@@ -19,6 +19,12 @@ cp "$repo/external/nds-bootstrap/bin/nds-bootstrap-nightly.nds" "$sd/_nds/dschee
 cp "$repo/dscheevos/module/build/dscheevos9.bin" "$repo/dscheevos/launcher/loader/out/load.bin" "$sd/_nds/dscheevos/"
 printf '%s\n' "$version" > "$sd/_nds/dscheevos/version.txt"
 
+# Cheevotron streamer variant of the module (same launcher and nds-bootstrap ABI):
+# a test card runs it by replacing dscheevos9.bin with this file.
+if [ -f "$repo/dscheevos/module/build-stream/dscheevos9.bin" ]; then
+  cp "$repo/dscheevos/module/build-stream/dscheevos9.bin" "$sd/_nds/dscheevos/dscheevos9-stream.bin"
+fi
+
 # Licenses of what the binaries contain
 lic=$sd/_nds/dscheevos/licenses
 cp "$repo/LICENSE" "$lic/dscheevos.txt"
