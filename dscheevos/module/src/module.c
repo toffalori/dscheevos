@@ -20,6 +20,18 @@
 #endif
 #include <string.h>
 
+#ifdef DSCM_STREAM
+#include "ds_stream_protocol.h"
+/* Cheevotron streamer (src/stream.c): no evaluation, just send the watched
+ * words to the phone. These replace the rcheevos paths in module_init and
+ * module_idle below. */
+void dscm_stream_start(const char* hash, const char* game_code, const char* title, int dtcm_known);
+int dscm_stream_net_init(void);
+void dscm_stream_service(uint32_t now_ms);
+void dscm_stream_frame(uint32_t frame);
+void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_max);
+#endif
+
 #define REG_VCOUNT (*(volatile uint16_t*)0x04000006)
 #define LINES_PER_FRAME 263
 
@@ -337,6 +349,15 @@ static uint32_t read_memory(uint32_t address, uint8_t* buffer, uint32_t num_byte
   return 0;
 }
 
+#ifdef DSCM_STREAM
+/* The streamer's read for stream.c: the same regions as read_memory. Returns
+ * the byte count, or 0 if the range is unreadable (then the word is zero). */
+int dscm_stream_read_bytes(uint32_t address, void* out, uint32_t len)
+{
+  return read_memory(address, (uint8_t*)out, len) ? (int)len : 0;
+}
+#endif
+
 /* The same regions as read_memory, for the core's direct snapshot copy
  * (dsc_capture, or a copy in the VBlank IRQ), after g_dtcm is refreshed. */
 /* Wake code: every capture calls it (it sat in the hot region, a code line
@@ -639,7 +660,11 @@ int module_init(const dscm_boot_t* boot)
       dsc_state_view(0x02000000u);
   }
 #endif
+#ifdef DSCM_STREAM
+  g_replies = NULL;                               /* the streamer loads no achievement set */
+#else
   g_replies = heap_load_begin(boot->file_size);   /* before the first malloc */
+#endif
   g_boot.host[sizeof(g_boot.host) - 1] = '\0';
   g_boot.username[sizeof(g_boot.username) - 1] = '\0';
   g_boot.token[sizeof(g_boot.token) - 1] = '\0';
@@ -651,6 +676,11 @@ int module_init(const dscm_boot_t* boot)
   dscm_irq.data_region = 0xFF;    /* the game's MPU region for it too (start.s) */
   dscm_g_status.hardcore = g_boot.hardcore;
 
+#ifdef DSCM_STREAM
+  (void)platform;
+  (void)config;
+  dscm_g_status.active = 1;   /* the streamer is active whenever the boot is valid */
+#else
   memset(&platform, 0, sizeof(platform));
   platform.read_memory = read_memory;
   platform.memory_map = memory_map;
@@ -713,6 +743,7 @@ int module_init(const dscm_boot_t* boot)
     update_progress();
   clean_notices();
   update_cues();
+#endif /* !DSCM_STREAM */
 
   /* Keep using the launcher's Wi-Fi connection during play. */
   if (dscm_g_status.active && g_boot.net_valid) {
@@ -746,15 +777,23 @@ int module_init(const dscm_boot_t* boot)
     memset(((dscm_boot_t*)g_session)->pmk, 0, sizeof(g_boot.pmk));
     dscm_dc_clean(((dscm_boot_t*)g_session)->pmk, sizeof(g_boot.pmk));
     /* still in the session: nothing writes the arena before the first frame */
-    if (g_boot.ca_length && g_boot.ca_offset <= g_boot.file_size && g_boot.ca_length <= g_boot.file_size - g_boot.ca_offset)
+    if (g_replies && g_boot.ca_length && g_boot.ca_offset <= g_boot.file_size && g_boot.ca_length <= g_boot.file_size - g_boot.ca_offset)
       https_add_ca(g_replies + g_boot.ca_offset, g_boot.ca_length);
     dscm_publish_net_ring((void*)DSCM_PHYS(ring));
     dscm_g_status.net_state = DSCM_NET_STATE_CONNECTING;
     H.net_started = 1;
     H.net_busy = 1;           /* the first pass services it */
   }
+#ifdef DSCM_STREAM
+  /* Open the UDP stream once the link is up. game_code and title are not in
+   * the session file; the phone loads the game from the hash. */
+  dscm_stream_start(g_boot.game_hash, NULL, NULL, H.dtcm_fixed);
+  if (dscm_stream_net_init() != 0)
+    dscm_g_status.error = DSCM_ERROR_NO_MEMORY;
+#else
   /* nothing reads the session's replies or CA from here on */
   heap_release_session();
+#endif
   g_initialized = 1;
   g_idle.frame = dscm_irq.frames;
   H.pass_frame = dscm_irq.frames - 1;   /* the first pass is a full one */
@@ -825,6 +864,9 @@ static void update_progress(void)
  * (cold: linked after the hot code, see module.ld):
  * evaluate what is queued (the in-game menu or a reset is about to have the
  * ARM7 copy the journal). Skipped if idle work holds the lock. */
+#ifdef DSCM_STREAM
+void module_flush(void) { }   /* no journal to flush when streaming */
+#else
 __attribute__((section(".text_cold"), noinline)) void module_flush(void)
 {
   if (!dscm_irq.on || dscm_lock(&H.busy))
@@ -832,6 +874,7 @@ __attribute__((section(".text_cold"), noinline)) void module_flush(void)
   dsc_flush();         /* the journal is cleaned to RAM at each step (journal_sync) */
   H.busy = 0;          /* notices, cues and stats: the next idle pass */
 }
+#endif
 
 /* A reset (nds-bootstrap's reset path, IRQs off) sets H.reset_pending and
  * clears H.busy, a pass the game's threads were running never resumes:
@@ -928,6 +971,7 @@ int dscm_idle_step(void)
  * that pass; idle_cut counts such passes.
  * Returns nonzero when it halted (the caller returns to the game's loop),
  * 0 for the stock halt. */
+#ifndef DSCM_STREAM
 #undef WP
 #define WP wp
 WAKE_CODE int module_idle(int idle_loop)
@@ -999,6 +1043,42 @@ WAKE_CODE int module_idle(int idle_loop)
 }
 #undef WP
 #define WP WAKE_PAGE
+#else
+/* Cheevotron streamer idle: once per new frame, service the Wi-Fi link and
+ * send the watched words to the phone. No evaluation and no snapshot arena;
+ * the only timing care is masking IRQs while the words are read (stream.c).
+ * Always returns 0, so the game's own OS_Halt runs after. */
+int module_idle(int idle_loop)
+{
+  uint32_t c;
+  if (!dscm_irq.on || !idle_loop)
+    return 0;
+  if (dscm_lock(&H.busy))
+    return 0;
+  c = dscm_vblank_count_read();
+  if (c != dscm_irq.last_vblank) {
+    dscm_irq.last_vblank = c;
+    dscm_irq.frames = c;
+    if (H.net_started) {
+      net_service(dscm_millis());
+      dscm_g_status.net_state = net_state();
+      dscm_g_status.net_detail = net_detail();
+      dscm_g_status.net_rejoins = link_rejoins();
+    }
+    dscm_stream_service(dscm_millis());
+    dscm_stream_frame(c);
+    if ((c % DSS_FULL_EVERY) == 0)
+      dscm_stream_status(c, net_state(), 0);
+  } else if (H.net_started && net_busy()) {
+    net_service(dscm_millis());   /* let an in-flight exchange progress within a frame */
+    dscm_stream_service(dscm_millis());
+  } else {
+    dscm_stream_service(dscm_millis());   /* HELLO cadence and liveness while unpaired */
+  }
+  H.busy = 0;
+  return 0;
+}
+#endif /* DSCM_STREAM */
 
 static void alias_check(void)
 {

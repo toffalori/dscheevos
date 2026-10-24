@@ -67,14 +67,28 @@ LWIP_SRC := $(addprefix $(LWIP)/src/, core/init.c core/def.c core/dns.c core/ine
 TLS_SRC := $(wildcard $(MBEDTLS)/library/*.c)
 NET_SRC := $(wildcard src/net/*.c) $(TLSCONF)/cacerts.c
 SRC := src/module.c src/syscalls.c src/heap.c src/fast_strtoul.c $(CORE)/src/dscheevos.c
+# Cheevotron streamer build: send the watched RAM words to the phone instead of
+# evaluating on the console (src/stream.c; module.c swaps its init and idle).
+ifeq ($(STREAM),1)
+CFLAGS += -DDSCM_STREAM
+SRC += src/stream.c
+endif
 OBJ := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(SRC))) $(patsubst $(RCHEEVOS)/src/%.c,$(BUILD)/rc/%.o,$(RC_SRC)) $(BUILD)/start.o \
   $(patsubst $(LWIP)/src/%.c,$(BUILD)/lwip/%.o,$(LWIP_SRC)) $(patsubst $(MBEDTLS)/library/%.c,$(BUILD)/tls/%.o,$(TLS_SRC)) \
   $(patsubst %.c,$(BUILD)/net/%.o,$(notdir $(NET_SRC)))
 
 # the hot-layout check (below) runs for the default build only: no colour, script or flag overrides
-HOTCHECK ?= $(if $(CACHED_COLOUR)$(WAKE_COLOUR)$(TEXT_COLOUR)$(DATA_COLOUR)$(LDSCRIPT)$(EXTRA_CFLAGS)$(EXTRA_LDFLAGS)$(filter-out file,$(origin DSC_FLAGS))$(filter-out 1,$(DATA_MIRROR))$(filter command line,$(origin STACK_GAP)),0,1)
-.PHONY: all clean hotcheck hot-accept
-all: $(BUILD)/dscheevos9.bin $(if $(filter 1,$(HOTCHECK)),hotcheck)
+HOTCHECK ?= $(if $(CACHED_COLOUR)$(WAKE_COLOUR)$(TEXT_COLOUR)$(DATA_COLOUR)$(LDSCRIPT)$(EXTRA_CFLAGS)$(EXTRA_LDFLAGS)$(filter-out file,$(origin DSC_FLAGS))$(filter-out 1,$(DATA_MIRROR))$(filter 1,$(STREAM))$(filter command line,$(origin STACK_GAP)),0,1)
+.PHONY: all clean hotcheck hot-accept stream
+ifeq ($(STREAM),1)
+all: $(BUILD)/dscheevos9.bin
+else
+# A normal build also compiles the Cheevotron streamer variant into build-stream
+# (a separate sub-make with STREAM=1), so CI that builds the module catches both.
+all: $(BUILD)/dscheevos9.bin $(if $(filter 1,$(HOTCHECK)),hotcheck) stream
+stream:
+	+$(MAKE) STREAM=1 BUILD=build-stream
+endif
 
 # flags live here: a Makefile change rebuilds everything
 $(OBJ): Makefile
