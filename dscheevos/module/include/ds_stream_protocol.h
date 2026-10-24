@@ -19,6 +19,7 @@
 #define DSS_MAGIC           0x5244u      /* 'D', 'R' */
 #define DSS_VERSION         1
 #define DSS_MAX_PAYLOAD     1400         /* one Ethernet frame through the ARM7 shim */
+#define DSS_HEADER_SIZE     8            /* sizeof(dss_header_t); matches the Kotlin HEADER_SIZE */
 
 /* console -> phone */
 #define DSS_T_HELLO         0x01
