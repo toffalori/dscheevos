@@ -24,6 +24,7 @@
 extern int dscm_stream_read_bytes(uint32_t ra_addr, void* out, uint32_t len);
 extern uint32_t dscm_irq_off(void);
 extern void dscm_irq_restore(uint32_t cpsr);
+extern dscm_status_t dscm_g_status;   /* the in-game menu reads it: show stream state here */
 
 /* ---- state ---- */
 
@@ -172,6 +173,10 @@ static void send_frame(uint32_t frame)
   memcpy(g_last, cur, n * 4);
   g_have_last = 1;
   g_frames_sent_total++;
+  /* the in-game menu's "Frames" counter moves while streaming works */
+  dscm_g_status.frames_snapshotted = g_frames_sent_total;
+  dscm_g_status.frames_evaluated = g_frames_sent_total;
+  dscm_g_status.unlocks_sent = g_watch_count;   /* words being streamed */
 }
 
 static void send_peek_reply(uint16_t request, uint32_t address, uint32_t frame, const uint8_t* data, uint16_t len)
@@ -339,6 +344,7 @@ void dscm_stream_service(uint32_t now_ms)
 {
   if (g_last_phone_ms == 1)         /* the callback heard from the phone this pass */
     g_last_phone_ms = now_ms ? now_ms : 1;
+  dscm_g_status.net_detail = g_paired ? g_session : 0;   /* nonzero in the menu = paired */
   if (g_paired) {
     if (now_ms - g_last_phone_ms > DSS_PAIR_TIMEOUT_MS) {
       g_paired = 0;
