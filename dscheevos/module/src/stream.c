@@ -118,45 +118,48 @@ static void read_words(uint8_t* out, uint16_t count)
 
 /* Build and send a FRAME for frame number `frame`. FULL while the table fits a
  * packet or a keyframe is due; DELTA otherwise (only changed words). */
+/* One FRAME. FULL (every word) only when the whole table fits one packet and
+ * a keyframe is due (forced, or no history yet); otherwise DELTA of the words
+ * that changed, as many as fit one packet. A table too big for a FULL packet
+ * (over ~345 words) streams by DELTA alone: the phone seeded every word with a
+ * PEEK when it registered the address, so it never needs a giant FULL. g_last
+ * is updated only for the words actually sent, so a big first frame or a burst
+ * of changes drains over the next few frames instead of being dropped. An
+ * all-unchanged frame still sends an empty DELTA, which carries the VBlank
+ * count and keeps the pairing alive. */
 static void send_frame(uint32_t frame)
 {
   static uint8_t cur[DSS_MAX_TABLE_WORDS * 4];
   uint8_t buf[DSS_MAX_PAYLOAD];
   uint16_t n = g_watch_count;
-  int full;
+  int fits_full = (DSS_HEADER_SIZE + 10 + (int)n * 4 <= DSS_MAX_PAYLOAD);
   read_words(cur, n);
 
-  full = g_force_full || !g_have_last || (DSS_HEADER_SIZE + 10 + n * 4 <= DSS_MAX_PAYLOAD && n * 4 + 10 + DSS_HEADER_SIZE <= DSS_MAX_PAYLOAD);
-  /* keyframe cadence */
-  if (!g_force_full && g_have_last && (frame % DSS_FULL_EVERY) != 0 && (DSS_HEADER_SIZE + 10 + n * 4 > DSS_MAX_PAYLOAD))
-    full = 0;
-
-  if (full) {
-    uint8_t* body;
-    uint16_t len = (uint16_t)(10 + n * 4);
-    if (DSS_HEADER_SIZE + len > DSS_MAX_PAYLOAD)
-      return;                        /* a full table too big for one packet: DELTA only (below) */
-    body = header(buf, DSS_T_FRAME, g_session, len);
+  if (fits_full && (g_force_full || !g_have_last)) {
+    uint8_t* body = header(buf, DSS_T_FRAME, g_session, (uint16_t)(10 + n * 4));
     put32(body + 0, frame);
     put16(body + 4, g_generation);
     body[6] = DSS_FRAME_FULL;
     body[7] = 0;
     put16(body + 8, n);
-    memcpy(body + 10, cur, n * 4);
-    send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + len));
+    if (n)
+      memcpy(body + 10, cur, n * 4);
+    send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + 10 + n * 4));
+    memcpy(g_last, cur, (size_t)n * 4);
+    g_have_last = 1;
     g_force_full = 0;
   } else {
-    /* DELTA: index (u16) + 4 bytes, for each changed word, as many as fit */
     uint8_t* body = header(buf, DSS_T_FRAME, g_session, 0);
-    uint16_t changed = 0, i;
     uint8_t* w = body + 10;
-    uint16_t room = (uint16_t)(DSS_MAX_PAYLOAD - DSS_HEADER_SIZE - 10);
-    for (i = 0; i < n && (uint16_t)((changed + 1) * 6) <= room; i++) {
+    uint16_t changed = 0, i, len;
+    const uint16_t max_pairs = (uint16_t)((DSS_MAX_PAYLOAD - DSS_HEADER_SIZE - 10) / 6);
+    for (i = 0; i < n && changed < max_pairs; i++) {
       if (memcmp(cur + i * 4, g_last + i * 4, 4) != 0) {
         put16(w, i);
         memcpy(w + 2, cur + i * 4, 4);
         w += 6;
         changed++;
+        memcpy(g_last + i * 4, cur + i * 4, 4);   /* only the words sent this frame */
       }
     }
     put32(body + 0, frame);
@@ -164,14 +167,13 @@ static void send_frame(uint32_t frame)
     body[6] = 0;                     /* DELTA */
     body[7] = 0;
     put16(body + 8, changed);
-    {
-      uint16_t len = (uint16_t)(10 + changed * 6);
-      put16(buf + 6, len);
-      send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + len));
-    }
+    len = (uint16_t)(10 + changed * 6);
+    put16(buf + 6, len);
+    send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + len));
+    g_have_last = 1;
+    if (!fits_full)
+      g_force_full = 0;              /* can't honour a FULL request on a big table */
   }
-  memcpy(g_last, cur, n * 4);
-  g_have_last = 1;
   g_frames_sent_total++;
   /* the in-game menu's "Frames" counter moves while streaming works */
   dscm_g_status.frames_snapshotted = g_frames_sent_total;
