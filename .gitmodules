@@ -1,7 +1,7 @@
 [submodule "tools/melonDS"]
 	path = tools/melonDS
 	url = https://github.com/skierrz/melonDS
-	branch = dscheevos-perf
+	branch = cheevotron
 [submodule "external/rcheevos"]
 	path = external/rcheevos
 	url = https://github.com/skierrz/rcheevos
@@ -14,8 +14,8 @@
 	url = https://github.com/devkitPro/nds-bootloader
 [submodule "external/nds-bootstrap"]
 	path = external/nds-bootstrap
-	url = https://github.com/skierrz/nds-bootstrap
-	branch = dscheevos-perf
+	url = https://github.com/toffalori/nds-bootstrap.git
+	branch = cheevotron
 [submodule "external/lwip"]
 	path = external/lwip
 	url = https://github.com/lwip-tcpip/lwip
