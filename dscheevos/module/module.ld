@@ -92,7 +92,10 @@ SECTIONS {
     __bss_start = .;
     *(.bss.S_storage)   /* the core state first: module.c's statics can't move it */
     *(.bss .bss.* .gnu.linkonce.b.*) *(COMMON)
-    . = ALIGN(4);
+    /* 32-aligned: the heap starts at __bss_end (heap.c LOW_BASE) and a game
+     * maps main RAM write-back, so the heap's first cache line must hold no
+     * bss byte, which the module writes through the uncached mirror. */
+    . = ALIGN(32);
     __bss_end = .;
   }
   __heap_start = __bss_end;
