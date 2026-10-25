@@ -785,9 +785,14 @@ int module_init(const dscm_boot_t* boot)
     H.net_busy = 1;           /* the first pass services it */
   }
 #ifdef DSCM_STREAM
-  /* Open the UDP stream once the link is up. game_code and title are not in
-   * the session file; the phone loads the game from the hash. */
-  dscm_stream_start(g_boot.game_hash, NULL, NULL, H.dtcm_fixed);
+  /* Open the UDP stream once the link is up. The phone loads the game from the
+   * hash, but also shows its name in the "Switch to ...?" prompt, so pass the
+   * title and game code from the NDS header the game left in main RAM (NTR mode
+   * header at 0x027FFE00: title at +0x00, 12 bytes; game code at +0x0C, 4). */
+  {
+    const char* ndsh = (const char*)0x027FFE00;
+    dscm_stream_start(g_boot.game_hash, ndsh + 0x0C, ndsh + 0x00, H.dtcm_fixed);
+  }
   if (dscm_stream_net_init() != 0)
     dscm_g_status.error = DSCM_ERROR_NO_MEMORY;
 #else
