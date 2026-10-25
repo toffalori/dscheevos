@@ -247,6 +247,31 @@ int main(int argc, char** argv)
     check_apfix();
   check_donor();
 
+  if (settings.stream) {
+    /* Cheevotron: no RetroAchievements on the console. Bring up the Wi-Fi the
+     * game keeps for the phone, write a session with only the Wi-Fi config and
+     * the game hash (no login, no set download, no placard), and boot. The
+     * phone runs rcheevos over the streamed RAM. */
+    for (;;) {
+      ui_status("Connecting to Wi-Fi for Cheevotron...");
+      wifi_started = 1;
+      if (net_connect(60 * 20) != 0) {
+        log_line("stream wifi: %s", net_error());
+        ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
+        if (ui_choose("Cheevotron needs Wi-Fi to reach\n the phone.", "Try again", "Play without achievements") == 'B')
+          boot_game(0);
+        continue;
+      }
+      if (!session_write(&settings, rom_path, hash)) {
+        log_line("stream: couldn't write the session file");
+        if (ui_choose("Couldn't write the session file.", "Try again", "Play without achievements") == 'B')
+          boot_game(0);
+        continue;
+      }
+      boot_game(1);
+    }
+  }
+
   for (;;) {
     session_info_t info;
     const char* error;

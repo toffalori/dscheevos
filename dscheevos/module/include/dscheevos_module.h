@@ -226,6 +226,7 @@ typedef struct dscm_boot_t {
 
 /* dscm_boot_t.flags */
 #define DSCM_BOOT_SPECTATOR 0x01      /* rc_client spectator mode: evaluate and show, send no unlocks or entries (bench runs on a real account) */
+#define DSCM_BOOT_STREAM    0x04      /* Cheevotron: the console streams RAM to the phone and runs no on-console RA (no placard) */
 /* dscm_boot_t.clock, dscm_status_t.clock, dscm_journal_t.clock: the speed-ups
  * the player chose in nds-bootstrap before launch (kept for the session) */
 #define DSCM_CLOCK_CPU_133  0x01      /* ARM9 at 133 MHz (BOOST_CPU, or DSI_MODE = 2 on a DS game) */

@@ -51,6 +51,7 @@ static void on_setting(const char* key, const char* value, void* ud)
   else if (!strcmp(key, "TOKEN")) copy(s->token, sizeof(s->token), value);
   else if (!strcmp(key, "SPECTATOR")) s->spectator = atoi(value) != 0;
   else if (!strcmp(key, "SKIP_UNOFFICIAL")) s->skip_unofficial = atoi(value) != 0;
+  else if (!strcmp(key, "STREAM")) s->stream = atoi(value) != 0;
   else if (!strcmp(key, "HOST")) copy(s->host, sizeof(s->host), value);
 }
 
@@ -77,6 +78,8 @@ int settings_save(const dsc_settings_t* s)
     fprintf(f, "SPECTATOR = 1\n");
   if (s->skip_unofficial)
     fprintf(f, "SKIP_UNOFFICIAL = 1\n");
+  if (s->stream)
+    fprintf(f, "STREAM = 1\n");
   fclose(f);
   return 1;
 }
