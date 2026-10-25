@@ -219,6 +219,7 @@ int main(int argc, char** argv)
   }
   log_start();
   settings_load(&settings);
+  if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
   if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
     ui_status("No game in _nds/nds-bootstrap.ini.");
     ui_status("Start games from TWiLight Menu++.");

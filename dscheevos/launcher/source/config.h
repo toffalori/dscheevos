@@ -12,6 +12,7 @@ typedef struct dsc_settings_t {
   int spectator;        /* SPECTATOR = 1 (ini only): play and show, send nothing */
   int skip_unofficial;  /* SKIP_UNOFFICIAL = 1: ask the server for the promoted achievements only (f=3) */
   int stream;           /* STREAM = 1 (Cheevotron): no on-console RA; stream RAM to the phone, which evaluates */
+  int cart;             /* CART = 1 (Cheevotron): boot the inserted Slot-1 cartridge natively, not the SD ROM (implies STREAM) */
   char username[32];
   char token[64];       /* from the server at login; the password is never stored */
   char host[64];
