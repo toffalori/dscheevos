@@ -1,9 +1,9 @@
 # DScheevos launcher (BlocksDS). Build:
 #   docker run --rm -v $PWD:/repo -w /repo/dscheevos/launcher skylyrac/blocksds:slim-latest make
 NAME          := dscheevos-launcher
-GAME_TITLE    := DScheevos
-GAME_SUBTITLE := RetroAchievements for DS
-GAME_AUTHOR   := DScheevos
+GAME_TITLE    := Cheevotron
+GAME_SUBTITLE := Achievements on real hardware
+GAME_AUTHOR   := Cheevotron
 
 SOURCEDIRS    := source rcheevos tls
 INCLUDEDIRS   := ../module/include ../../external/rcheevos/include ../../external/rcheevos/src \

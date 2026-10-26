@@ -5,6 +5,8 @@
 
 void ui_init(void);
 void ui_header(const char* game, const char* line2);   /* top screen */
+/* Branded loading screen: wordmark, the game name, and a status line. */
+void ui_splash(const char* game);
 void ui_status(const char* fmt, ...);                  /* top screen, below the header */
 void ui_clear_bottom(void);
 void ui_bottom(const char* fmt, ...);

@@ -253,8 +253,9 @@ int main(int argc, char** argv)
      * game keeps for the phone, write a session with only the Wi-Fi config and
      * the game hash (no login, no set download, no placard), and boot. The
      * phone runs rcheevos over the streamed RAM. */
+    ui_splash(basename_of(rom_path));
     for (;;) {
-      ui_status("Connecting to Wi-Fi for Cheevotron...");
+      ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
       if (net_connect(60 * 20) != 0) {
         log_line("stream wifi: %s", net_error());
