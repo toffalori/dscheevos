@@ -100,10 +100,8 @@ int net_connect(int timeout_frames, void (*each_frame)(void))
       return -1;
     }
     state = 1;
-  } else {
-    Wifi_DisconnectAP();
   }
-  Wifi_AutoConnect();
+  Wifi_AutoConnect();   /* also restarts the search after "cannot connect" */
   for (i = 0; i < timeout_frames; i++) {
     int status = Wifi_AssocStatus();
     if (status == ASSOCSTATUS_ASSOCIATED) {
