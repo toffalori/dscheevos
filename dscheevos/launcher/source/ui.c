@@ -7,8 +7,8 @@
 
 static PrintConsole top, bottom;
 
-/* Dark indigo backdrop (console palette entry 0 = the screen background). */
-#define UI_BACKDROP RGB15(2, 3, 9)
+/* Black backdrop (console palette entry 0 = the screen background). */
+#define UI_BACKDROP RGB15(0, 0, 0)
 
 static int splash_rows = 0;   /* rows the splash drew on top; status prints below */
 
@@ -62,7 +62,8 @@ void ui_splash(const char* game)
     snprintf(name, sizeof(name), "%s", game);
     center(14, name);
   }
-  splash_rows = 17;   /* ui_status lines go here, below the splash */
+  center(16, "\x1b[36mLoading...\x1b[39m");   /* cyan, above the status lines */
+  splash_rows = 18;   /* ui_status lines go here, below the splash */
   consoleSelect(&top);
   printf("\x1b[%d;0H", splash_rows);
 }
