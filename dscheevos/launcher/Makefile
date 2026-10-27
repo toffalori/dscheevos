@@ -1,9 +1,11 @@
 # DScheevos launcher (BlocksDS). Build:
 #   docker run --rm -v $PWD:/repo -w /repo/dscheevos/launcher skylyrac/blocksds:slim-latest make
 NAME          := dscheevos-launcher
+# Two banner lines: BlocksDS joins TITLE;AUTHOR when the subtitle is empty, so
+# the tagline goes in GAME_AUTHOR (a third "Cheevotron" line looked doubled).
 GAME_TITLE    := Cheevotron
-GAME_SUBTITLE := Achievements on real hardware
-GAME_AUTHOR   := Cheevotron
+GAME_SUBTITLE :=
+GAME_AUTHOR   := Achievements on real hardware
 GAME_ICON     := icon.bmp
 
 SOURCEDIRS    := source rcheevos tls

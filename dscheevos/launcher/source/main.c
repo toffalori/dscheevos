@@ -218,6 +218,9 @@ int main(int argc, char** argv)
     for (;;) swiWaitForVBlank();
   }
   log_start();
+  /* how we were started: TWiLight/unlaunch leave SCFG open; the DSi Menu
+   * (hiyaCFW icon) may not, and nds-bootstrap's cart boot needs it */
+  log_line("scfg9: ext=%08lX a9rom=%02X", (unsigned long)REG_SCFG_EXT, *(vu8*)0x04004000);
   settings_load(&settings);
   if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
   if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
