@@ -7,6 +7,10 @@ GAME_TITLE    := Cheevotron
 GAME_SUBTITLE :=
 GAME_AUTHOR   := Achievements on real hardware
 GAME_ICON     := icon.bmp
+# A fixed game code (title ID 00030004:KCVT) instead of the "####" default, so
+# NTM installs the hiyaCFW icon under the same title every time and overwrites
+# it on update instead of adding a copy with a random title ID.
+NDSTOOL_ARGS  := -g KCVT
 
 SOURCEDIRS    := source rcheevos tls
 INCLUDEDIRS   := ../module/include ../../external/rcheevos/include ../../external/rcheevos/src \
