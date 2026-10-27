@@ -19,6 +19,7 @@
 #include <nds.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define BOOTSTRAP_PATH DSC_DIR "nds-bootstrap.nds"
@@ -115,11 +116,49 @@ static void boot_game(int with_achievements)
   else if (wifi_started)
     Wifi_DisableWifi();   /* never started otherwise: DSWiFi's IPC isn't set up, it data-aborts */
   restore_twlcfg();
+  log_line("chainload");
   int err = chainload(BOOTSTRAP_PATH, 1, argv);
   log_line("chainload failed: %d", err);
   ui_status("\x1b[31;1mCouldn't start nds-bootstrap (%d)\x1b[39;0m", err);
   ui_status("%s", err == CHAINLOAD_ERR_LOADER ? CHAINLOAD_LOADER_PATH : BOOTSTRAP_PATH);
   for (;;) swiWaitForVBlank();
+}
+
+#define HASH_CACHE DSC_DIR "hashes.txt"
+
+/* The game's RetroAchievements hash, remembered by file, size and time
+ * ("size time hash path" lines): hashing reads the header, both binaries and
+ * more of the ROM from the SD card, at every start. */
+static int hash_rom(const char* path, char hash[33])
+{
+  struct stat st;
+  char line[320], cached[33], cached_path[260];
+  unsigned long size, mtime;
+  FILE* f;
+  if (stat(path, &st) != 0)
+    return session_hash_rom(path, hash);
+  f = fopen(HASH_CACHE, "r");
+  if (f) {
+    while (fgets(line, sizeof(line), f)) {
+      if (sscanf(line, "%lu %lu %32s %259[^\n]", &size, &mtime, cached, cached_path) == 4 && strlen(cached) == 32
+          && size == (unsigned long)st.st_size && mtime == (unsigned long)st.st_mtime && !strcmp(cached_path, path)) {
+        fclose(f);
+        memcpy(hash, cached, 33);
+        log_line("hash: remembered");
+        return 1;
+      }
+    }
+    fclose(f);
+  }
+  if (!session_hash_rom(path, hash))
+    return 0;
+  f = fopen(HASH_CACHE, "a");
+  if (f) {
+    fprintf(f, "%lu %lu %s %s\n", (unsigned long)st.st_size, (unsigned long)st.st_mtime, hash, path);
+    fclose(f);
+  }
+  log_line("hash: computed");
+  return 1;
 }
 
 static int game_is_dsi_mode(int ini_dsi_mode)
@@ -322,7 +361,7 @@ int main(int argc, char** argv)
   }
 
   ui_status("Checking the game...");
-  if (!session_hash_rom(rom_path, hash)) {
+  if (!hash_rom(rom_path, hash)) {
     ui_wait("Couldn't read the game file.", 120);
     boot_game(0);
   }
@@ -339,6 +378,7 @@ int main(int argc, char** argv)
     for (;;) {
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
+      log_line("wifi: connecting");
       if (net_connect(60 * 20) != 0) {
         log_line("stream wifi: %s", net_error());
         ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
@@ -346,6 +386,7 @@ int main(int argc, char** argv)
           boot_game(0);
         continue;
       }
+      log_line("wifi: connected");
       if (!session_write(&settings, rom_path, hash)) {
         log_line("stream: couldn't write the session file");
         if (ui_choose("Couldn't write the session file.", "Try again", "Play without achievements") == 'B')
