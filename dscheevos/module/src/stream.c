@@ -26,6 +26,10 @@ extern uint32_t dscm_irq_off(void);
 extern void dscm_irq_restore(uint32_t cpsr);
 extern dscm_status_t dscm_g_status;   /* the in-game menu reads it: show stream state here */
 
+/* start.s: bump the counters the ARM7 card engine reads to blink the DSi LED */
+extern void dscm_publish_notify(uint32_t count);
+extern void dscm_publish_cues(uint32_t cues);
+
 /* ---- state ---- */
 
 static struct udp_pcb* g_pcb;
@@ -59,6 +63,11 @@ static int       g_force_full;
 static dss_hello_t g_hello;
 static uint32_t    g_frame_sent;       /* last frame number streamed */
 static uint32_t    g_frames_sent_total, g_frames_stale_total, g_peeks_answered;
+
+/* LED cues: the phone tells us what it unlocked; the ARM7 card engine reads
+ * these counters (header notify_count/cues) and blinks the DSi's LED. */
+static uint32_t    g_notify_count;     /* unlocks the phone reported (monotonic) */
+static uint32_t    g_led_cues;         /* DSCM_CUE_* bitfield for leaderboard/progress */
 
 /* ---- small writers ---- */
 
@@ -271,6 +280,31 @@ static void on_control(const uint8_t* body, uint16_t len)
   }
 }
 
+/* The phone evaluates the set and unlocks; it then sends a CUE so the console
+ * can blink its LED, the way the on-console build does for its own unlocks. */
+static void on_cue(const uint8_t* body, uint16_t len)
+{
+  if (len < 1)
+    return;
+  switch (body[0]) {
+    case DSS_CUE_UNLOCK:
+      dscm_publish_notify(++g_notify_count);
+      break;
+    case DSS_CUE_LEADERBOARD:
+      g_led_cues = (g_led_cues & ~DSCM_CUE_LEADERBOARD_MASK)
+                 | ((g_led_cues + (1u << DSCM_CUE_LEADERBOARD_SHIFT)) & DSCM_CUE_LEADERBOARD_MASK);
+      dscm_publish_cues(g_led_cues);
+      break;
+    case DSS_CUE_PROGRESS:
+      g_led_cues = (g_led_cues & ~DSCM_CUE_PROGRESS_MASK)
+                 | ((g_led_cues + 1) & DSCM_CUE_PROGRESS_MASK);
+      dscm_publish_cues(g_led_cues);
+      break;
+    default:
+      break;
+  }
+}
+
 static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr_t* addr, u16_t port)
 {
   uint8_t buf[DSS_MAX_PAYLOAD];
@@ -301,6 +335,7 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
           switch (type) {
             case DSS_T_PEEK:      on_peek(body, length); break;
             case DSS_T_CONTROL:   on_control(body, length); break;
+            case DSS_T_CUE:       on_cue(body, length); break;
             case DSS_T_KEEPALIVE: break;   /* liveness only */
             default: break;
           }

@@ -32,6 +32,8 @@
 #define DSS_T_KEEPALIVE     0x83
 #define DSS_T_PEEK          0x84
 #define DSS_T_CONTROL       0x85
+#define DSS_T_NOTICE        0x86   /* GameCube: a text line the console shows on the TV */
+#define DSS_T_CUE           0x87   /* phone tells the console an unlock/leaderboard/etc. fired, for the LED cue */
 
 #define DSS_MAX_TABLE_WORDS 1024
 #define DSS_TABLE_CHUNK     256
@@ -54,6 +56,11 @@
 #define DSS_CTRL_FULL       1
 #define DSS_CTRL_DELTA      2
 #define DSS_CTRL_RESET      3
+
+/* DSS_T_CUE body[0]: what the phone unlocked, so the console can blink its LED */
+#define DSS_CUE_UNLOCK      0
+#define DSS_CUE_LEADERBOARD 1
+#define DSS_CUE_PROGRESS    2
 
 typedef struct __attribute__((packed)) {
   uint16_t magic;
