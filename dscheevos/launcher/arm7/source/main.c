@@ -58,6 +58,15 @@ static void freeze_wifi(void)
 
 int main(void)
 {
+    // Started straight from the DSi Menu (the hiyaCFW icon), the ARM7 gets the
+    // SCFG_EXT7 of our header (0x80040407: no NDMA, no NWRAM, ...). Started from
+    // TWiLight it already has everything on. nds-bootstrap's first stage relies
+    // on the starter for this and only sets it itself much later, so its SD
+    // access hangs before the first log line. Turn everything on like TWiLight
+    // (the value nds-bootstrap's bootloader uses too), while we still may.
+    if (isDSiMode() && (REG_SCFG_EXT & BIT(31)))
+        REG_SCFG_EXT = 0x93FFFB06;
+
     enableSound();
     readUserSettings();
     ledBlink(0);
