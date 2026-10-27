@@ -56,6 +56,52 @@ static void hand_over_wifi(void)
   }
 }
 
+#define TWLCFG     ((u8*)0x02000400)    /* DSi settings, 0x128 bytes */
+#define HWINFO_N   ((u8*)0x02000600)    /* HWINFO_N.dat, 0x14 bytes */
+
+/* The test nds-bootstrap's first stage uses (conf_sd.cpp, useTwlCfg). */
+static int twlcfg_present(void)
+{
+  return TWLCFG[0] && !TWLCFG[1] && !TWLCFG[2] && !TWLCFG[4] && TWLCFG[0x48];
+}
+
+static int read_at(const char* path, long offset, void* dst, size_t size)
+{
+  FILE* f = fopen(path, "rb");
+  int ok = f && fseek(f, offset, SEEK_SET) == 0 && fread(dst, 1, size, f) == size;
+  if (f)
+    fclose(f);
+  return ok;
+}
+
+/* nds-bootstrap's first stage takes the DSi settings (TWLCFG) from
+ * 0x02000400. When they aren't there it mounts the NAND to read them, and
+ * that waits for its ARM7 to read the eMMC CID, which that ARM7 only does
+ * later: started straight from the DSi Menu, both screens stay white for
+ * ever. TWiLight Menu++ puts them there before starting us; started from the
+ * menu, our binary's first 2 KB (zeros) cover them. Fill them in from the
+ * SD-NAND copy (hiyaCFW) as nds-bootstrap would, Wi-Fi firmware fields and
+ * HWINFO_N included. */
+static void restore_twlcfg(void)
+{
+  u8 wl_type = 0;
+  if (!isDSiMode() || twlcfg_present())
+    return;
+  if (!read_at("sd:/shared1/TWLCFG0.dat", 0x88, TWLCFG, 0x128)) {
+    log_line("twlcfg: missing, and no sd:/shared1/TWLCFG0.dat");
+    return;
+  }
+  readFirmware(0x1FD, &wl_type, 1);      /* WlFirm type (1=DWM-W015, 2=W024, 3=W028) */
+  TWLCFG[0x1E0] = wl_type;
+  *(u32*)(TWLCFG + 0x1E4) = (wl_type == 2 || wl_type == 3) ? 0x520000 : 0x500400;   /* RAM vars */
+  *(u32*)(TWLCFG + 0x1E8) = (wl_type == 2 || wl_type == 3) ? 0x520000 : 0x500000;   /* RAM base */
+  *(u32*)(TWLCFG + 0x1EC) = (wl_type == 2 || wl_type == 3) ? 0x020000 : 0x02E000;   /* RAM size */
+  if (!read_at("sd:/sys/HWINFO_N.dat", 0x88, HWINFO_N, 0x14))
+    log_line("twlcfg: no sd:/sys/HWINFO_N.dat");
+  DC_FlushRange(TWLCFG, 0x214);
+  log_line("twlcfg: restored from SD-NAND (%s), wlfirm %d", twlcfg_present() ? "valid" : "INVALID", wl_type);
+}
+
 /* Hands over to nds-bootstrap; only returns on failure. */
 static void boot_game(int with_achievements)
 {
@@ -68,6 +114,7 @@ static void boot_game(int with_achievements)
     hand_over_wifi();
   else if (wifi_started)
     Wifi_DisableWifi();   /* never started otherwise: DSWiFi's IPC isn't set up, it data-aborts */
+  restore_twlcfg();
   int err = chainload(BOOTSTRAP_PATH, 1, argv);
   log_line("chainload failed: %d", err);
   ui_status("\x1b[31;1mCouldn't start nds-bootstrap (%d)\x1b[39;0m", err);
@@ -249,6 +296,10 @@ int main(int argc, char** argv)
   }
   log_start();
   log_scfg();
+  if (isDSiMode())
+    log_line("twlcfg at start: %s (%02X %02X 448=%02X), cid@2FFD7BC=%08lX",
+             twlcfg_present() ? "present" : "missing", TWLCFG[0], TWLCFG[1], TWLCFG[0x48],
+             (unsigned long)*(vu32*)0x02FFD7BC);
   settings_load(&settings);
   if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
   if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
