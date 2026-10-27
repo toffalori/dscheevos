@@ -7,6 +7,8 @@ void ui_init(void);
 void ui_header(const char* game, const char* line2);   /* top screen */
 /* Branded loading screen: wordmark, the game name, and a status line. */
 void ui_splash(const char* game);
+/* Moves the splash's "Loading..." dots; call once per frame while waiting. */
+void ui_tick(void);
 void ui_status(const char* fmt, ...);                  /* top screen, below the header */
 void ui_clear_bottom(void);
 void ui_bottom(const char* fmt, ...);

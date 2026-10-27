@@ -188,7 +188,7 @@ static int log_in(void)
       continue;
     ui_status("Logging in as %s...", settings.username);
     wifi_started = 1;
-    if (net_connect(60 * 20) != 0) {
+    if (net_connect(60 * 20, ui_tick) != 0) {
       ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
       continue;
     }
@@ -291,34 +291,27 @@ static void settings_menu(void)
   }
 }
 
-/* How we were started. Started straight from the DSi Menu (the hiyaCFW icon),
- * SCFG is as the menu leaves it for a DSiWare title; started from TWiLight
- * Menu++, as its first program set it up. The ARM7 makes it like TWiLight's
- * and reports both states (arm7/source/main.c); the ARM9 part is here: like
- * TWiLight's booter, stop the DSP and camera clocks. */
+/* How we were started: the DSi Menu (hiyaCFW icon) and TWiLight Menu++ leave
+ * different SCFG states. The ARM7 reports its own (arm7/source/main.c). */
 static void log_scfg(void)
 {
-  u32 r[8];
+  u32 r[5];
   int n = 0, t;
   if (!isDSiMode())
     return;
   log_line("scfg9: ext=%08lX a9rom=%02X clk=%04X", (unsigned long)REG_SCFG_EXT, *(vu8*)0x04004000, REG_SCFG_CLK);
-  if (REG_SCFG_EXT & SCFG_EXT_SCFG_MBK_REG)
-    REG_SCFG_CLK &= ~(SCFG_CLK_DSP | SCFG_CLK_CAMERA_IF);
-  for (t = 0; t < 60 && n < 8; t++) {
-    while (n < 8 && fifoCheckValue32(FIFO_USER_02))
+  for (t = 0; t < 60 && n < 5; t++) {
+    while (n < 5 && fifoCheckValue32(FIFO_USER_02))
       r[n++] = fifoGetValue32(FIFO_USER_02);
-    if (n < 8)
+    if (n < 5)
       swiWaitForVBlank();
   }
-  if (n < 8) {
+  if (n < 5) {
     log_line("scfg7: no report from the ARM7 (%d)", n);
     return;
   }
-  log_line("scfg7 start: rom=%04lX clk=%04lX ext=%08lX mc=%04lX delays=%08lX",
+  log_line("scfg7: rom=%04lX clk=%04lX ext=%08lX mc=%04lX delays=%08lX",
            (unsigned long)r[0], (unsigned long)r[1], (unsigned long)r[2], (unsigned long)r[3], (unsigned long)r[4]);
-  log_line("scfg7 set:   clk=%04lX ext=%08lX delays=%08lX",
-           (unsigned long)r[5], (unsigned long)r[6], (unsigned long)r[7]);
 }
 
 int main(int argc, char** argv)
@@ -383,7 +376,7 @@ int main(int argc, char** argv)
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
       log_line("wifi: connecting");
-      if (net_connect(60 * 20) != 0) {
+      if (net_connect(60 * 20, ui_tick) != 0) {
         log_line("stream wifi: %s", net_error());
         ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
         if (ui_choose("Cheevotron needs Wi-Fi to reach\n the phone.", "Try again", "Play without achievements") == 'B')
@@ -411,7 +404,7 @@ int main(int argc, char** argv)
 
     ui_status("Connecting to Wi-Fi...");
     wifi_started = 1;
-    if (net_connect(60 * 20) != 0) {
+    if (net_connect(60 * 20, ui_tick) != 0) {
       log_line("wifi: %s", net_error());
       ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
       if (ui_choose("Achievements need the Internet\n when the game starts.", "Try again", "Play without achievements") == 'B')

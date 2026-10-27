@@ -19,10 +19,11 @@
 #define HANDOVER_FREEZE 0x46524545u   // "FREE"
 #define HANDOVER_DONE   0x444F4E45u   // "DONE"
 
-// The SCFG state we were started with, then after setup(), for the ARM9's
-// log (FIFO_USER_02, in this order).
+// The SCFG state we were started with, for the ARM9's log (FIFO_USER_02, in
+// this order).
 #define FIFO_SCFG_REPORT FIFO_USER_02
-static u32 scfg_report[8];
+#define SCFG_REPORT_WORDS 5
+static u32 scfg_report[SCFG_REPORT_WORDS];
 
 static volatile bool exit_loop = false;
 static volatile bool freeze_requested = false;
@@ -61,38 +62,24 @@ static void freeze_wifi(void)
     fifoSendValue32(FIFO_HANDOVER, HANDOVER_DONE);
 }
 
-// Started straight from the DSi Menu (the hiyaCFW icon), we get the ARM7
-// SCFG state the menu leaves for a DSiWare title. Started from TWiLight Menu++
-// we get the state its first program ("booter") sets up. nds-bootstrap's first
-// stage relies on the latter: its ARM7 reads the AES unit (to find the console
-// ID) before it answers the ARM9, so without the AES clock both CPUs wait for
-// ever, before NDSBTSRP.LOG is even created. Do what TWiLight's booter does
-// (booter/arm7/source/main.c), while SCFG is still writable.
-static void setup_scfg_like_twilight(void)
+// The ARM7 SCFG state we were started with, for launcher.log: the DSi Menu
+// (hiyaCFW icon) and TWiLight Menu++ leave different states, and starts from
+// the menu once hung in nds-bootstrap. That turned out to be the DSi settings
+// at 0x02000400 (launcher main.c, restore_twlcfg); the menu's SCFG is fine
+// (clocks and access all on), so this only reports it.
+static void report_scfg(void)
 {
     scfg_report[0] = REG_SCFG_ROM;
     scfg_report[1] = REG_SCFG_CLK;
     scfg_report[2] = REG_SCFG_EXT;
     scfg_report[3] = REG_SCFG_MC;
     scfg_report[4] = ((u32)REG_SCFG_CARD_INSERT_DELAY << 16) | REG_SCFG_CARD_PWROFF_DELAY;
-    if (REG_SCFG_EXT & SCFG_EXT_SCFG_MBK_REG) {
-        REG_SCFG_CLK = 0x187;                   // SD/MMC, AES, NWRAM, touch clocks
-        REG_SCFG_EXT = 0x93FFFB06;              // NDMA, AES, SDIO, NWRAM, ... on
-        REG_SCFG_CARD_INSERT_DELAY = SCFG_CARD_INSERT_DELAY_DEFAULT;
-        REG_SCFG_CARD_PWROFF_DELAY = SCFG_CARD_PWROFF_DELAY_DEFAULT;
-        *(vu32*)0x0400481C = 0;                 // SD/MMC IRQ status
-        *(vu32*)0x04004820 = 0;                 // SD/MMC IRQ mask
-        *(vu16*)0x04004C02 = 0x4000;            // GPIO IRQ: power button
-    }
-    scfg_report[5] = REG_SCFG_CLK;
-    scfg_report[6] = REG_SCFG_EXT;
-    scfg_report[7] = ((u32)REG_SCFG_CARD_INSERT_DELAY << 16) | REG_SCFG_CARD_PWROFF_DELAY;
 }
 
 int main(void)
 {
     if (isDSiMode())
-        setup_scfg_like_twilight();
+        report_scfg();
 
     enableSound();
     readUserSettings();
@@ -108,7 +95,7 @@ int main(void)
         installCameraFIFO();
     fifoSetValue32Handler(FIFO_HANDOVER, handover_handler, NULL);
     if (isDSiMode())
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < SCFG_REPORT_WORDS; i++)
             fifoSendValue32(FIFO_SCFG_REPORT, scfg_report[i]);
 
     setPowerButtonCB(power_button_callback);

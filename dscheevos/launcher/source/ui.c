@@ -7,10 +7,32 @@
 
 static PrintConsole top, bottom;
 
-/* Black backdrop (console palette entry 0 = the screen background). */
-#define UI_BACKDROP RGB15(0, 0, 0)
+/* White theme: the start goes white from here to the game (the loaders between
+ * show white, and nds-bootstrap shows a copy of the splash in these colours:
+ * keep them equal to holdLoadingScreen() in its bootloaderi/source/arm9/
+ * main.arm9.c). Palette entry 0 is the screen background; entry 16*n+15
+ * holds console colour n. */
+#define UI_BACKDROP RGB15(31, 31, 31)
+#define UI_WORDMARK RGB15(0, 11, 15)    /* \x1b[36;1m */
+#define UI_ACCENT   RGB15(0, 15, 19)    /* \x1b[36m: rule, Loading */
+#define UI_DIM      RGB15(13, 13, 14)   /* \x1b[30;1m: tagline */
+#define UI_TEXT     RGB15(4, 4, 5)      /* default (\x1b[39m) */
 
 static int splash_rows = 0;   /* rows the splash drew on top; status prints below */
+static int dots = 3, dot_frames;   /* the splash's "Loading..." dots */
+
+static void apply_theme(u16* pal)
+{
+  pal[0] = UI_BACKDROP;
+  pal[6 * 16 + 15] = UI_ACCENT;
+  pal[14 * 16 + 15] = UI_WORDMARK;
+  pal[8 * 16 + 15] = UI_DIM;
+  pal[7 * 16 + 15] = UI_TEXT;
+  pal[15 * 16 + 15] = UI_TEXT;
+  pal[9 * 16 + 15] = RGB15(24, 3, 3);    /* \x1b[31;1m: errors */
+  pal[10 * 16 + 15] = RGB15(2, 17, 4);   /* \x1b[32;1m: A */
+  pal[11 * 16 + 15] = RGB15(21, 13, 0);  /* \x1b[33;1m: warnings */
+}
 
 void ui_init(void)
 {
@@ -20,9 +42,23 @@ void ui_init(void)
   vramSetBankC(VRAM_C_SUB_BG);
   consoleInit(&top, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
   consoleInit(&bottom, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 3, false, true);
-  BG_PALETTE[0] = UI_BACKDROP;
-  BG_PALETTE_SUB[0] = UI_BACKDROP;
+  apply_theme(BG_PALETTE);
+  apply_theme(BG_PALETTE_SUB);
   consoleSelect(&top);
+}
+
+/* Keeps the splash's dots moving while something waits, so a slow start
+ * doesn't look like a hang (nds-bootstrap's copy of the screen goes on with
+ * them). Call once per frame. */
+void ui_tick(void)
+{
+  if (!splash_rows || ++dot_frames < 20)
+    return;
+  dot_frames = 0;
+  dots = (dots + 1) & 3;
+  consoleSelect(&top);
+  printf("\x1b[16;18H\x1b[36m%.*s%*s\x1b[39m", dots, "...", 3 - dots, "");   /* "Loading..." is at column 11 */
+  printf("\x1b[%d;0H", splash_rows);
 }
 
 /* Visible length: the printed width, skipping "\x1b[...m" colour sequences. */

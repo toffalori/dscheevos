@@ -81,17 +81,29 @@ int net_current_ap(net_ap_t* out)
   return 0;
 }
 
-int net_connect(int timeout_frames)
+/* DSWiFi starts once; a retry only searches again. (Wifi_InitDefault with
+ * WFC_CONNECT also waits for the connection and fails when no saved access
+ * point answers; calling it again then waits for ever for an ARM7 that is
+ * already running.) */
+int net_connect(int timeout_frames, void (*each_frame)(void))
 {
-  static int initialized;
+  static int state;   /* 0 not started, 1 started, -1 failed to start */
   int i;
-  if (!initialized) {
-    if (!Wifi_InitDefault(WFC_CONNECT | WIFI_ATTEMPT_DSI_MODE)) {
-      g_error = "Wi-Fi didn't start";
+  if (state < 0) {
+    g_error = "Wi-Fi didn't start: turn the console off and on";
+    return -1;
+  }
+  if (state == 0) {
+    if (!Wifi_InitDefault(WIFI_ATTEMPT_DSI_MODE)) {
+      state = -1;
+      g_error = "Wi-Fi didn't start: turn the console off and on";
       return -1;
     }
-    initialized = 1;
+    state = 1;
+  } else {
+    Wifi_DisconnectAP();
   }
+  Wifi_AutoConnect();
   for (i = 0; i < timeout_frames; i++) {
     int status = Wifi_AssocStatus();
     if (status == ASSOCSTATUS_ASSOCIATED) {
@@ -103,6 +115,8 @@ int net_connect(int timeout_frames)
       g_error = "Couldn't connect to a saved access point";
       return -1;
     }
+    if (each_frame)
+      each_frame();
     swiWaitForVBlank();
   }
   g_error = "No saved access point answered";

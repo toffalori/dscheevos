@@ -6,8 +6,9 @@
 #include <stdint.h>
 
 /* Connects with the access points saved in the console's settings. Uses the
- * DSi's own Wi-Fi (WPA2) when available. Returns 0 when online. */
-int net_connect(int timeout_frames);
+ * DSi's own Wi-Fi (WPA2) when available. Returns 0 when online. Calls
+ * each_frame (if any) once per frame while it waits. */
+int net_connect(int timeout_frames, void (*each_frame)(void));
 const char* net_error(void);
 
 /* The access point we joined, as seen in its beacons (no keys). */
