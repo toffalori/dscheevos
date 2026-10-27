@@ -8,27 +8,17 @@
 
 #define LOG_PATH DSC_DIR "launcher.log"
 
-/* Milliseconds since log_start, for the start-up timeline. ARM9 timers 2 and
- * 3 cascaded at 32728 Hz (BUS_CLOCK / 1024): tls.c and bench.c restart
- * timer 0 for their own measurements. */
+/* Milliseconds since log_start, for the start-up timeline: the CPU timing
+ * timers (0 and 1), which tls.c then reads for entropy without restarting.
+ * DSWiFi takes timers 2 and 3. Wraps after 128 s. */
 static void ticks_start(void)
 {
-  TIMER_CR(2) = 0;
-  TIMER_CR(3) = 0;
-  TIMER_DATA(2) = 0;
-  TIMER_DATA(3) = 0;
-  TIMER_CR(3) = TIMER_ENABLE | TIMER_CASCADE;
-  TIMER_CR(2) = TIMER_ENABLE | TIMER_DIV_1024;
+  cpuStartTiming(0);
 }
 
 static unsigned long ticks_ms(void)
 {
-  u16 hi, lo;
-  do {
-    hi = TIMER_DATA(3);
-    lo = TIMER_DATA(2);
-  } while (hi != TIMER_DATA(3));
-  return (unsigned long)((((u64)hi << 16) | lo) * 1000 / (BUS_CLOCK / 1024));
+  return (unsigned long)(cpuGetTiming() / (BUS_CLOCK / 1000));
 }
 
 void log_start(void)

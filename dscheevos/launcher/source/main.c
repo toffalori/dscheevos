@@ -328,7 +328,7 @@ int main(int argc, char** argv)
   (void)argc; (void)argv;
 
   ui_init();
-  ui_header("", NULL);
+  ui_splash(NULL);   /* the Cheevotron screen from the first frame; the game's name joins it */
   if (!fatInitDefault()) {
     ui_status("\x1b[31;1mCan't read the SD card\x1b[39;0m");
     for (;;) swiWaitForVBlank();
@@ -342,11 +342,16 @@ int main(int argc, char** argv)
   settings_load(&settings);
   if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
   if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
+    ui_header("", NULL);
     ui_status("No game in _nds/nds-bootstrap.ini.");
     ui_status("Start games from TWiLight Menu++.");
     for (;;) swiWaitForVBlank();
   }
-  ui_header(basename_of(rom_path), NULL);
+  /* Cheevotron keeps the splash; on-console achievements list the session below a header */
+  if (settings.stream)
+    ui_splash(basename_of(rom_path));
+  else
+    ui_header(basename_of(rom_path), NULL);
 
   /* hold SELECT while the game starts for settings */
   scanKeys();
@@ -373,8 +378,7 @@ int main(int argc, char** argv)
     /* Cheevotron: no RetroAchievements on the console. Bring up the Wi-Fi the
      * game keeps for the phone, write a session with only the Wi-Fi config and
      * the game hash (no login, no set download, no placard), and boot. The
-     * phone runs rcheevos over the streamed RAM. */
-    ui_splash(basename_of(rom_path));
+     * phone runs rcheevos over the streamed RAM. The splash is up already. */
     for (;;) {
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;

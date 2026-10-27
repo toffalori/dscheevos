@@ -54,6 +54,14 @@ void ui_splash(const char* game)
 {
   char name[31];
   consoleSelect(&top);
+  if (splash_rows) {
+    /* already up (shown before the game was known): only add its name, so it stays one screen */
+    snprintf(name, sizeof(name), "%s", game ? game : "");
+    printf("\x1b[14;0H\x1b[2K");
+    center(14, name);
+    printf("\x1b[%d;0H", splash_rows);
+    return;
+  }
   consoleClear();
   center(8, "\x1b[36;1mC H E E V O T R O N\x1b[39;0m");               /* wordmark, bright cyan */
   center(9, "\x1b[36m--------------------\x1b[39m");                  /* accent rule */

@@ -49,7 +49,8 @@ void tls_stir(void)
     mbedtls_sha256_starts(&g_pool, 0);
     Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, mac);
     mbedtls_sha256_update(&g_pool, mac, sizeof(mac));
-    cpuStartTiming(0);
+    if (!(TIMER_CR(0) & TIMER_ENABLE))   /* log.c's clock may run already: keep it */
+      cpuStartTiming(0);
     g_pool_ready = 1;
   }
   sample[0] = cpuGetTiming();
