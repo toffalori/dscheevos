@@ -407,6 +407,14 @@ int session_write(const dsc_settings_t* settings, const char* rom_path, const ch
       boot.ap_group_cipher = ap.group_cipher;
     }
   }
+  /* Stream-pairing diagnostic: the game's in-game Wi-Fi only comes up when
+   * net_valid is set, and it can only rejoin a dropped AP when ssid_len>0 and
+   * (open or WPA2+pmk). Log what the launcher captured so a run that won't
+   * reach the phone shows whether the fault is here or in the handover. */
+  log_line("net: valid=%d ip=%08lX nm=%08lX gw=%08lX ssid_len=%d sec=%d ch=%d ssid=%.*s",
+           boot.net_valid, (unsigned long)boot.ip, (unsigned long)boot.netmask,
+           (unsigned long)boot.gateway, boot.ap_ssid_len, boot.ap_security,
+           boot.ap_channel, (int)boot.ap_ssid_len, boot.ap_ssid);
   /* extra trusted CA for a self-hosted or test server: the module takes DER */
   ca = fopen(DSC_DIR "ca.pem", "rb");
   if (ca) {
