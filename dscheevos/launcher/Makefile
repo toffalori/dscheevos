@@ -4,6 +4,7 @@ NAME          := dscheevos-launcher
 GAME_TITLE    := Cheevotron
 GAME_SUBTITLE := Achievements on real hardware
 GAME_AUTHOR   := Cheevotron
+GAME_ICON     := icon.bmp
 
 SOURCEDIRS    := source rcheevos tls
 INCLUDEDIRS   := ../module/include ../../external/rcheevos/include ../../external/rcheevos/src \
