@@ -205,6 +205,36 @@ static void settings_menu(void)
   }
 }
 
+/* How we were started. Started straight from the DSi Menu (the hiyaCFW icon),
+ * SCFG is as the menu leaves it for a DSiWare title; started from TWiLight
+ * Menu++, as its first program set it up. The ARM7 makes it like TWiLight's
+ * and reports both states (arm7/source/main.c); the ARM9 part is here: like
+ * TWiLight's booter, stop the DSP and camera clocks. */
+static void log_scfg(void)
+{
+  u32 r[8];
+  int n = 0, t;
+  if (!isDSiMode())
+    return;
+  log_line("scfg9: ext=%08lX a9rom=%02X clk=%04X", (unsigned long)REG_SCFG_EXT, *(vu8*)0x04004000, REG_SCFG_CLK);
+  if (REG_SCFG_EXT & SCFG_EXT_SCFG_MBK_REG)
+    REG_SCFG_CLK &= ~(SCFG_CLK_DSP | SCFG_CLK_CAMERA_IF);
+  for (t = 0; t < 60 && n < 8; t++) {
+    while (n < 8 && fifoCheckValue32(FIFO_USER_02))
+      r[n++] = fifoGetValue32(FIFO_USER_02);
+    if (n < 8)
+      swiWaitForVBlank();
+  }
+  if (n < 8) {
+    log_line("scfg7: no report from the ARM7 (%d)", n);
+    return;
+  }
+  log_line("scfg7 start: rom=%04lX clk=%04lX ext=%08lX mc=%04lX delays=%08lX",
+           (unsigned long)r[0], (unsigned long)r[1], (unsigned long)r[2], (unsigned long)r[3], (unsigned long)r[4]);
+  log_line("scfg7 set:   clk=%04lX ext=%08lX delays=%08lX",
+           (unsigned long)r[5], (unsigned long)r[6], (unsigned long)r[7]);
+}
+
 int main(int argc, char** argv)
 {
   int dsi_mode;
@@ -218,9 +248,7 @@ int main(int argc, char** argv)
     for (;;) swiWaitForVBlank();
   }
   log_start();
-  /* how we were started: TWiLight/unlaunch leave SCFG open; the DSi Menu
-   * (hiyaCFW icon) may not, and nds-bootstrap's cart boot needs it */
-  log_line("scfg9: ext=%08lX a9rom=%02X", (unsigned long)REG_SCFG_EXT, *(vu8*)0x04004000);
+  log_scfg();
   settings_load(&settings);
   if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
   if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
