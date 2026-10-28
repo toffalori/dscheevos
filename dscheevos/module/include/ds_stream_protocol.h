@@ -304,7 +304,18 @@ typedef struct __attribute__((packed)) {
   uint16_t dispmode_fixed; /* GX_DispOff's saved mode found 3 and put back to 1 */
   uint8_t  dispoff;        /* GX_DispOff in the game: 0 looking, 1 found, 2 not found */
   uint8_t  reserved7;
-} dss_display_status_t;    /* 136; the skips count frames, once per reason */
+  /* the line path's feed: what else held the bus while a band was up, and how
+     far the feed got by the VBlank (a FIFO underrun shifts the rest of the
+     band to the right, so a spread between the least and the most means some) */
+  uint32_t feed_dma_seen;  /* channels seen busy at a band's start or its VBlank (bits): 0-3 DMA0-3, 4-7 NDMA0-3
+                              (bit 6 never: NDMA2 is ours), 8-11 DMA0-3 feeding the geometry FIFO */
+  uint32_t feed_busy_start;/* bands that started with another channel busy */
+  uint32_t feed_busy_end;  /* bands that reached the VBlank with another channel busy */
+  uint32_t feed_xfer_n;    /* bands measured at the VBlank (stage on only) */
+  int32_t  feed_xfer_min;  /* words the feed had moved by the VBlank, minus the band's rows x 128: the least */
+  int32_t  feed_xfer_max;  /* and the most (if NDMA2SAD doesn't count up, both read -rows x 128) */
+  uint32_t feed_gcnt;      /* NDMAGCNT when the line path went up: bit 31 round robin, 16-19 its CPU cycles */
+} dss_display_status_t;    /* 164; the skips count frames, once per reason */
 
 /* DSS_T_CODE: 48 bytes of the game's IRQ dispatcher code, sent once a game
  * (the dispatcher and OS_IrqHandler_ThreadSwitch), so an unrecognised one

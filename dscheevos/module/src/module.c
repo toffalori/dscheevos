@@ -1064,6 +1064,7 @@ WAKE_CODE int module_idle(int idle_loop)
  * A pop-up's band is armed first (it has a deadline in the frame), and again
  * after the network work if an IRQ ended it meanwhile (popup.c).
  * Always returns 0, so the game's own OS_Halt runs after. */
+static uint32_t g_status_frame;   /* frame of the last STATUS */
 int module_idle(int idle_loop)
 {
   uint32_t c;
@@ -1089,8 +1090,12 @@ int module_idle(int idle_loop)
     }
     dscm_stream_service(dscm_millis());
     dscm_stream_frame(c);
-    if ((c % DSS_FULL_EVERY) == 0)
+    if (c - g_status_frame >= DSS_FULL_EVERY) {
+      /* by distance, not c % 60: idle passes skip frames (a 30 fps scene
+       * idles on every other one), so an exact multiple may never come */
+      g_status_frame = c;
       dscm_stream_status(c, net_state(), 0);
+    }
   } else if (H.net_started && net_busy()) {
     net_service(dscm_millis());   /* let an in-flight exchange progress within a frame */
     dscm_stream_service(dscm_millis());

@@ -450,6 +450,12 @@ dscm_dtcm_base:
 	.equ	L_NEXPIRE, 200              @ L_LATCHED after which the parameters are stale (popup.c stopped
 	                                    @ refreshing them: no idle time): no band
 	.equ	L_LYC2, 204                 @ the LYC we wrote before L_LYC (a game DISPSTAT RMW may put it back)
+	.equ	C_DMASEEN, 208              @ telemetry: channels seen busy at a band's start or VBlank (dma_busy bits)
+	.equ	C_BUSYS, 212                @ bands that started with another channel busy
+	.equ	C_BUSYE, 216                @ bands that reached the VBlank with another channel busy
+	.equ	C_XMIN, 220                 @ the feed's words moved by the VBlank minus rows x 128: the least (signed;
+	.equ	C_XMAX, 224                 @ popup.c starts them at INT32_MAX / INT32_MIN), the most,
+	.equ	C_XN, 228                   @ and the bands measured (stage on only)
 	.equ	SPIN_MAX, 4096
 	.equ	REASSERT_MAX, 64            @ the game keeps turning our VCOUNT IRQ off: leave it to the game
 
@@ -724,6 +730,51 @@ band_down:
 	streq	r1, [r2, #0x54]             @ NDMA2CNT off (it stalls once mode 3 is gone)
 	bx	lr
 
+@ Telemetry: the channels other than our feed that are busy now, in r0 as
+@ C_DMASEEN's bits (0-3 DMA0-3, 4-7 NDMA0-3 without our NDMA2, 8-11 DMA0-3 in
+@ geometry-FIFO mode). r12 = 0x04000000; r1, r2 change.
+dma_busy:
+	mov	r0, #0
+	ldr	r1, [r12, #0xB8]            @ DMA0CNT
+	tst	r1, #0x80000000
+	beq	1f
+	orr	r0, r0, #0x001
+	and	r1, r1, #0x38000000         @ start mode 7: the geometry FIFO
+	cmp	r1, #0x38000000
+	orreq	r0, r0, #0x100
+1:	ldr	r1, [r12, #0xC4]            @ DMA1CNT
+	tst	r1, #0x80000000
+	beq	1f
+	orr	r0, r0, #0x002
+	and	r1, r1, #0x38000000
+	cmp	r1, #0x38000000
+	orreq	r0, r0, #0x200
+1:	ldr	r1, [r12, #0xD0]            @ DMA2CNT
+	tst	r1, #0x80000000
+	beq	1f
+	orr	r0, r0, #0x004
+	and	r1, r1, #0x38000000
+	cmp	r1, #0x38000000
+	orreq	r0, r0, #0x400
+1:	ldr	r1, [r12, #0xDC]            @ DMA3CNT
+	tst	r1, #0x80000000
+	beq	1f
+	orr	r0, r0, #0x008
+	and	r1, r1, #0x38000000
+	cmp	r1, #0x38000000
+	orreq	r0, r0, #0x800
+1:	add	r2, r12, #0x4100
+	ldr	r1, [r2, #0x1C]             @ NDMA0CNT (nds-bootstrap's card engine)
+	tst	r1, #0x80000000
+	orrne	r0, r0, #0x010
+	ldr	r1, [r2, #0x38]             @ NDMA1CNT (the card engine too)
+	tst	r1, #0x80000000
+	orrne	r0, r0, #0x020
+	ldr	r1, [r2, #0x70]             @ NDMA3CNT
+	tst	r1, #0x80000000
+	orrne	r0, r0, #0x080
+	bx	lr
+
 line_vcount:
 	ldr	r1, [r3, #L_OWN]
 	cmp	r1, #0
@@ -880,6 +931,14 @@ line_vcount:
 	ldr	r1, [r3, #C_SPIN]
 	cmp	r2, r1
 	strhi	r2, [r3, #C_SPIN]
+	bl	dma_busy                    @ telemetry: other channels busy as the band starts
+	ldr	r1, [r3, #C_DMASEEN]
+	orr	r1, r1, r0
+	str	r1, [r3, #C_DMASEEN]
+	cmp	r0, #0
+	ldrne	r1, [r3, #C_BUSYS]
+	addne	r1, r1, #1
+	strne	r1, [r3, #C_BUSYS]
 	b	line_chain
 line_late:
 	ldr	r1, [r3, #C_LATE]
@@ -905,7 +964,35 @@ line_vblank:
 5:	ldr	r1, [r3, #L_UP]
 	cmp	r1, #0
 	beq	2f
-	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
+	bl	dma_busy                    @ telemetry: other channels busy at the band's end
+	ldr	r1, [r3, #C_DMASEEN]
+	orr	r1, r1, r0
+	str	r1, [r3, #C_DMASEEN]
+	cmp	r0, #0
+	ldrne	r1, [r3, #C_BUSYE]
+	addne	r1, r1, #1
+	strne	r1, [r3, #C_BUSYE]
+	ldr	r0, [r3, #L_STAGE]
+	cmp	r0, #2
+	bne	6f                          @ dry: mode 1, the FIFO isn't drained, nothing to measure
+	add	r2, r12, #0x4100
+	ldr	r0, [r2, #0x3C]             @ NDMA2SAD: how far our feed got, should the register count up
+	ldr	r1, [r3, #L_SRC]
+	sub	r0, r0, r1
+	asr	r0, r0, #2                  @ words moved
+	ldr	r1, [r3, #L_FIRST]
+	rsb	r1, r1, #192                @ the band's rows
+	sub	r0, r0, r1, lsl #7          @ minus rows x 128
+	ldr	r1, [r3, #C_XMIN]
+	cmp	r0, r1
+	strlt	r0, [r3, #C_XMIN]
+	ldr	r1, [r3, #C_XMAX]
+	cmp	r0, r1
+	strgt	r0, [r3, #C_XMAX]
+	ldr	r1, [r3, #C_XN]
+	add	r1, r1, #1
+	str	r1, [r3, #C_XN]
+6:	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
 	and	r1, r1, #3
 	ldr	r0, [r3, #L_STAGE]
 	cmp	r0, #2
@@ -1012,6 +1099,8 @@ line_chain:                          @ our lines to RAM, r0 and lr as the BIOS l
 	add	r1, r3, #160
 	mcr	p15, 0, r1, c7, c10, 1
 	add	r1, r3, #192
+	mcr	p15, 0, r1, c7, c10, 1
+	add	r1, r3, #224                @ C_XMAX, C_XN
 	mcr	p15, 0, r1, c7, c10, 1
 	ldr	lr, [r3, #L_BIOS_LR]
 	mrc	p15, 0, r0, c9, c1, 0
