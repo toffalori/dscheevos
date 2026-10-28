@@ -18,7 +18,7 @@ static volatile uint32_t g_vector;
 /* start.s stand-ins */
 void dscm_irq_wrapper(void) {}
 volatile uint32_t dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs;
-uint32_t dscm_cp15_control(void) { return 1u << 13; }
+uint32_t dscm_cp15_control(void) { return 1u << 13 | 1u << 16; }   /* high vectors, DTCM on */
 uint32_t dscm_dtcm_base(void) { return 0x027C0000u; }
 uint32_t dscm_irq_off(void) { return 0; }
 void dscm_irq_restore(uint32_t cpsr) { (void)cpsr; }
@@ -188,6 +188,7 @@ int main(int argc, char** argv)
   dscm_popup_set_mode(DSS_DISPLAY_ON);
   DISPCNT = 0x10108u;          /* mode 1, BG0 3D, BG0 on */
   REG_IE = 1;                  /* VBlank */
+  DISPSTAT = 0x08;             /* VBlank IRQ on */
   POWCNT1 = 0x8203;            /* engine A on top */
   g_vector = 0x01FF8000u;      /* the game's handler, in ITCM */
   for (i = 0; i < 40; i++)
@@ -233,15 +234,19 @@ int main(int argc, char** argv)
   }
   { const uint8_t r[2] = { DSS_POPUP_QUEUED, DSS_POPUP_DROPPED }; expect_states(r, 2); }
 
-  /* the vector changed under an armed band: stood down */
+  /* the vector changed under an armed band (a soft reset): the band is stopped;
+   * the third time, pop-ups stand down for the game */
   dscm_popup_on_popup(g_pkt, popup_packet(6, DSS_POPUP_TEST, DSS_POPUP_TOAST, 0, 0, "", "x", "", ""));
   REG16(0x04000006) = 100;
   dscm_popup_idle(++t_frame);
-  dscm_popup_idle(++t_frame);
-  if (g_vector != WRAPPER) { printf("FAIL: not armed\n"); return 1; }
-  g_vector = 0x01FF9000u;      /* the game set another handler */
-  dscm_popup_idle(++t_frame);
-  if (g_standdown != DSS_POPUP_WHY_VECTOR || NDMA_CNT(3)) { printf("FAIL: no stand-down\n"); return 1; }
+  for (i = 0; i < VECTOR_LOST_MAX; i++) {
+    dscm_popup_idle(++t_frame);
+    if (g_vector != WRAPPER) { printf("FAIL: not armed (%d)\n", i); return 1; }
+    g_vector = 0x01FF9000u;    /* the game set another handler */
+    dscm_popup_idle(++t_frame);
+    if (g_stats.vector_lost != (uint32_t)i + 1) { printf("FAIL: vector loss not seen\n"); return 1; }
+    if ((g_standdown == DSS_POPUP_WHY_VECTOR) != (i == VECTOR_LOST_MAX - 1)) { printf("FAIL: stand-down at %d\n", i); return 1; }
+  }
   g_standdown = 0;
   g_sent_count = 0;
   g_cur.phase = P_FREE;

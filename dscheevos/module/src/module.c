@@ -35,6 +35,7 @@ void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_
 void dscm_popup_init(void);
 void dscm_popup_idle(uint32_t frame);
 void dscm_popup_rearm(void);
+extern uint8_t dscm_popup_active;
 #endif
 
 #define REG_VCOUNT (*(volatile uint16_t*)0x04000006)
@@ -1070,7 +1071,8 @@ int module_idle(int idle_loop)
   if (dscm_lock(&H.busy))
     return 0;
   c = dscm_vblank_count_read();
-  dscm_popup_idle(c);
+  if (dscm_popup_active)
+    dscm_popup_idle(c);
   if (c != dscm_irq.last_vblank) {
     dscm_irq.last_vblank = c;
     dscm_irq.frames = c;
@@ -1090,7 +1092,8 @@ int module_idle(int idle_loop)
   } else {
     dscm_stream_service(dscm_millis());   /* HELLO cadence and liveness while unpaired */
   }
-  dscm_popup_rearm();
+  if (dscm_popup_active)
+    dscm_popup_rearm();
   H.busy = 0;
   return 0;
 }

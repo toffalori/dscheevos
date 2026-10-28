@@ -399,6 +399,7 @@ dscm_irq_wrapper:
 	ldr	r2, [r3, #WRAP_HITS]
 	add	r2, r2, #1
 	str	r2, [r3, #WRAP_HITS]
+	mcr	p15, 0, r3, c7, c10, 1      @ clean the words' line: a game's cache invalidate can't undo them
 	add	r12, r12, #0x4100           @ the NDMA registers
 	mov	r3, #0
 	ldr	r2, [r12, #0x70]            @ NDMA3CNT
@@ -438,6 +439,7 @@ dscm_irq_wrapper:
 	ldr	r1, [r1, #WRAP_ORIG]
 	bx	r1
 	.global dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs
+	.balign	32                          @ one cache line for the four words
 dscm_wrap_orig:
 	.word	0                           @ the game's IRQ handler, saved at arming
 dscm_wrap_hits:

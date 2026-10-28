@@ -143,6 +143,9 @@ static uint16_t g_badge_age;
 
 /* ---- the strip's state ---- */
 
+/* A pop-up is waiting, up or armed: module_idle calls in only then, so the
+ * game's idle wakes cost nothing more the rest of the time. */
+uint8_t dscm_popup_active;
 static uint8_t  g_mode;                        /* DSS_DISPLAY_*, from the phone (off until it says) */
 static uint8_t  g_standdown;                   /* DSS_POPUP_WHY_*: off for the rest of the game */
 static uint8_t  g_armed;                       /* the wrapper's entry for the last arming is due */
@@ -152,6 +155,9 @@ static uint32_t g_shown_seen, g_cut_seen;      /* counts at the last frame tick 
 static uint32_t g_frame;                       /* the VBlank count at the last tick */
 static uint16_t g_screen_frames;               /* frames engine A stayed on the same screen */
 static uint16_t g_screen_last;
+static uint32_t g_fifo_frame;                  /* the frame the FIFO channel was last started in */
+static uint8_t  g_skips_seen;                  /* SKIP(): reasons counted in this frame */
+#define VECTOR_LOST_MAX 3                      /* the vector changed under an armed band this often: off */
 static uint8_t  g_rendered;                    /* g_band holds g_cur */
 static uint16_t g_rows;                        /* g_cur's band height */
 static dss_display_status_t g_stats;
@@ -331,6 +337,12 @@ void dscm_popup_on_popup(const uint8_t* body, uint16_t len)
   }
   p.phase = P_QUEUED;
   p.st.edge = 0;       /* the bottom edge only, for now */
+  if (!dscm_popup_active) {
+    /* the screen is watched from now on (ticks run only while active) */
+    g_screen_last = POWCNT1 & POWCNT1_TOP;
+    g_screen_frames = 0;
+    dscm_popup_active = 1;
+  }
   g_queue[g_queue_count] = p;
   set_state(&g_queue[g_queue_count], DSS_POPUP_QUEUED, DSS_POPUP_WHY_NONE);
   g_queue_count++;
@@ -467,9 +479,9 @@ static void render(void)
 
   for (x = 0; x < 256 * (rows + MARGIN) / 2; x++)
     w32[x] = bg2;
-  for (x = 0; x < 256; x++)
-    g_band[(rows - 1) * 256 + x] = C_EDGE;
-  for (y = 0; y < rows; y++)                   /* accent bar on the badge's side */
+  for (x = 0; x < 256; x++)                    /* the edge against the game's picture */
+    g_band[x] = C_EDGE;
+  for (y = 1; y < rows; y++)                   /* accent bar on the badge's side */
     for (x = 0; x < 3; x++)
       g_band[y * 256 + (right ? 255 - x : x)] = accent;
 
@@ -526,8 +538,9 @@ static void stop_channels(void)
   for (i = 0; i < 64 && (NDMA_CNT(CH_DISPCNT) & NDMA_ON) && NDMA_DAD(CH_DISPCNT) == 0x04000000u; i++) {}
   if ((NDMA_CNT(CH_FIFO) & NDMA_ON) && NDMA_DAD(CH_FIFO) == MMEM_FIFO)
     NDMA_CNT(CH_FIFO) = 0;
-  if ((DISPCNT & MODE_MASK) == MODE_3)
-    DISPCNT_MODE = (uint8_t)((DISPCNT_MODE & ~3) | 1);
+  for (i = 0; i < 2; i++)                      /* again, should a last table word have landed */
+    if ((DISPCNT & MODE_MASK) == MODE_3)
+      DISPCNT_MODE = (uint8_t)((DISPCNT_MODE & ~3) | 1);
 }
 
 static volatile uint32_t* irq_vector(void)
@@ -552,13 +565,15 @@ static void collect(void)
       dscm_irq_restore(cpsr);
       return;                                  /* no IRQ yet */
     }
-    /* The vector was changed while we were on it: nothing will stop the
-     * band, so stop it here, and show nothing more in this game. */
+    /* The vector was changed while we were on it (nds-bootstrap's soft reset
+     * clears it, or the game set another handler): nothing will stop the
+     * band, so stop it here. A reset happens now and then; a game that keeps
+     * replacing the vector gets no more pop-ups. */
     stop_channels();
     dscm_irq_restore(cpsr);
     g_armed = 0;
-    g_standdown = DSS_POPUP_WHY_VECTOR;
-    g_stats.skip_vector++;
+    if (++g_stats.vector_lost >= VECTOR_LOST_MAX)
+      g_standdown = DSS_POPUP_WHY_VECTOR;
     return;
   }
   dscm_irq_restore(cpsr);
@@ -599,66 +614,102 @@ static int dma_busy(void)
   return 0;
 }
 
-/* Arm the band for this frame, from the idle thread. IRQs masked throughout:
- * the wrapper goes on the vector last, then the caller halts. */
+/* A reason a frame's band was skipped, counted once per frame however many
+ * idle wakes it held up (some games wake 20-40 times a frame). */
+#define SKIP(field, bit) do { if (!(g_skips_seen & (bit))) { g_skips_seen |= (bit); g_stats.field++; } } while (0)
+
+/* Arm the band for this frame, from the idle thread: every game thread is
+ * blocked, so only an IRQ can run game code before the halt. IRQs are masked
+ * from the checks to the wrapper going on the vector, last. */
 static void arm(void)
 {
   const int rows = visible_rows();
   const uint32_t first = (uint32_t)(LAST_LINE + 1 - rows);
   volatile uint32_t* vec;
-  uint32_t cpsr, vc, d, cur, l;
+  uint32_t cpsr, vc, d, cur, l, ie, ds, ctl;
+  int i;
 
   if (rows <= 0 || g_armed || g_standdown || g_mode == DSS_DISPLAY_OFF)
     return;
+  /* An IRQ ended this frame's band before its first line: the display FIFO
+   * may still hold words the first arming fed it, which a second one in the
+   * same frame would show first (proven on hardware only from a new frame). */
+  if (g_mode == DSS_DISPLAY_ON && g_fifo_frame == g_frame)
+    return;
+  /* The per-line DISPCNT table, with IRQs still on (most of a line through
+   * the uncached mirror): rebuilt only when the game's value, the band's
+   * first line or the mode changed. DISPCNT is read again below. */
+  d = DISPCNT;
+  if (g_mode >= DSS_DISPLAY_NOOP && (d & MODE_MASK) == MODE_1
+      && (g_table_mode != g_mode || g_table_base != d || g_table_first != first)) {
+    for (l = 0; l < 192; l++)
+      g_table[l] = (g_mode == DSS_DISPLAY_ON && l >= first && l <= LAST_LINE) ? ((d & ~MODE_MASK) | MODE_3) : d;
+    dscm_dc_clean(g_table, sizeof(g_table));
+    g_table_mode = g_mode;
+    g_table_base = d;
+    g_table_first = (uint16_t)first;
+  }
+
   cpsr = dscm_irq_off();
-  vc = VCOUNT;
-  if (vc >= 192 || vc + 2 > first) {
-    g_stats.skip_late++;
-    goto out;
-  }
-  if (REG_IE & REG_IF) {
-    g_stats.skip_pending++;
-    goto out;
-  }
   /* the wrapper must run at the VBlank at the latest; no IRQ on every line */
-  if (!(REG_IE & 1) || ((REG_IE & 2) && (DISPSTAT & 0x10))) {
-    g_stats.skip_irq++;
+  ie = REG_IE;
+  ds = DISPSTAT;
+  if (!(ie & 1) || !(ds & 0x08) || ((ie & 2) && (ds & 0x10))) {
+    SKIP(skip_irq, 1);
     goto out;
   }
   d = DISPCNT;
   if ((d & MODE_MASK) != MODE_1 || (d & 0x80) || ((MASTER_BRIGHT >> 14) && (MASTER_BRIGHT & 31))
       || (DISPCAPCNT & 0x80000000u)) {
-    g_stats.skip_display++;
+    SKIP(skip_display, 2);
     goto out;
   }
   if (dma_busy()) {
-    g_stats.skip_dma++;
+    SKIP(skip_dma, 4);
     goto out;
   }
-  if (g_screen_frames < SCREEN_STABLE) {
-    g_stats.skip_screen++;
+  if (g_screen_frames < SCREEN_STABLE || (POWCNT1 & POWCNT1_TOP) != g_screen_last) {
+    SKIP(skip_screen, 8);
     goto out;
   }
-  /* high vectors: the BIOS's IRQ entry reads [DTCM+0x3FFC] */
+  /* high vectors, so the BIOS's IRQ entry reads [DTCM+0x3FFC], and DTCM on */
+  ctl = dscm_cp15_control();
   vec = irq_vector();
-  cur = *vec;
-  if (!(dscm_cp15_control() & (1u << 13)) || cur == WRAPPER
-      || (cur - 0x01000000u >= 0x01000000u && cur - 0x02000000u >= 0x01000000u)) {
-    g_stats.skip_vector++;
+  if (!(ctl & (1u << 13)) || !(ctl & (1u << 16))) {
+    SKIP(skip_vector, 16);
     goto out;
+  }
+  cur = *vec;
+  if (cur == WRAPPER || (cur - 0x01000000u >= 0x01000000u && cur - 0x02000000u >= 0x01000000u)) {
+    SKIP(skip_vector, 16);
+    goto out;
+  }
+  if (g_mode >= DSS_DISPLAY_NOOP && (g_table_mode != g_mode || g_table_base != d || g_table_first != first)) {
+    SKIP(skip_display, 2);                     /* DISPCNT changed since the table: next wake */
+    goto out;
+  }
+  /* Out of this line's H-Blank (bounded), so its H-Blank trigger is still to
+   * come and the table's first word lands at the end of this line. */
+  for (i = 0; i < 256 && (DISPSTAT & 0x02); i++) {}
+  vc = VCOUNT;
+  if (vc >= 192 || vc + 2 > first) {
+    SKIP(skip_late, 32);
+    goto out;
+  }
+  if (REG_IE & REG_IF) {
+    SKIP(skip_pending, 64);
+    goto out;
+  }
+  /* a VCOUNT-match IRQ from here to the band's end would cut it every frame */
+  if ((ie & 4) && (ds & 0x20)) {
+    const uint32_t lyc = (ds >> 8) | ((ds & 0x80) << 1);
+    if (lyc >= vc && lyc <= 191) {
+      SKIP(skip_irq, 1);
+      goto out;
+    }
   }
 
   if (g_mode >= DSS_DISPLAY_NOOP) {
-    /* the per-line DISPCNT table: rebuilt only when the game's value, the
-     * band's first line or the mode changed */
-    if (g_table_mode != g_mode || g_table_base != d || g_table_first != first) {
-      for (l = 0; l < 192; l++)
-        g_table[l] = (g_mode == DSS_DISPLAY_ON && l >= first && l <= LAST_LINE) ? ((d & ~MODE_MASK) | MODE_3) : d;
-      dscm_dc_clean(g_table, sizeof(g_table));
-      g_table_mode = g_mode;
-      g_table_base = d;
-      g_table_first = (uint16_t)first;
-    }
     /* NDMA3: from the H-Blank of this line, the next line's word each H-Blank */
     NDMA_CNT(CH_DISPCNT) = 0;
     NDMA_SAD(CH_DISPCNT) = DSCM_PHYS(&g_table[vc + 1]);
@@ -666,25 +717,33 @@ static void arm(void)
     NDMA_TCNT(CH_DISPCNT) = 191 - vc;
     NDMA_WCNT(CH_DISPCNT) = 1;
     NDMA_BCNT(CH_DISPCNT) = 0;
+    if ((DISPSTAT & 0x02) || VCOUNT != vc) {   /* this line's H-Blank came meanwhile */
+      SKIP(skip_late, 32);
+      goto out;
+    }
     NDMA_CNT(CH_DISPCNT) = NDMA_ON | NDMA_START(0x07) | NDMA_DFIX | NDMA_PHYS(0);
     if (g_mode == DSS_DISPLAY_ON) {
       /* NDMA2: the band's rows (and the margin) into the display FIFO; mode 1
-       * lines don't drain it, so it is ready when the band's first line comes */
+       * lines don't drain it, so it is ready when the band's first line comes.
+       * While it slides, the band's lower rows show: it rises from the edge. */
       NDMA_CNT(CH_FIFO) = 0;
-      NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_band);
+      NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_band + (g_rows - rows) * 256);
       NDMA_DAD(CH_FIFO) = MMEM_FIFO;
       NDMA_TCNT(CH_FIFO) = (uint32_t)(rows + MARGIN) * 128;
       NDMA_WCNT(CH_FIFO) = 4;
       NDMA_BCNT(CH_FIFO) = 0;
       NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x09) | NDMA_PHYS(2) | NDMA_DFIX;
+      g_fifo_frame = g_frame;                  /* fed now: no second start this frame */
     }
     if (VCOUNT != vc) {                        /* a line went by: the table would be a line off */
       stop_channels();
-      g_stats.skip_late++;
+      SKIP(skip_late, 32);
       goto out;
     }
   }
   dscm_wrap_orig = cur;
+  /* the wrapper's words to RAM: a game's cache invalidate must not lose them */
+  dscm_dc_clean((const void*)&dscm_wrap_orig, 16);
   g_armed_hits = dscm_wrap_hits;
   g_armed_first = (uint16_t)first;
   g_armed = 1;
@@ -713,9 +772,10 @@ static void tick(uint32_t frame)
   const uint16_t screen = POWCNT1 & POWCNT1_TOP;
   int showed;
   g_frame = frame;
+  g_skips_seen = 0;
   if (screen == g_screen_last) {
-    const uint32_t f = g_screen_frames + (passed < 0xFFFF ? passed : 0xFFFF);
-    g_screen_frames = (uint16_t)(f < 0xFFFF ? f : 0xFFFF);
+    if (g_screen_frames < 0xFFFF)   /* one a tick: a frame skipped between ticks may have swapped */
+      g_screen_frames++;
   } else {
     g_screen_last = screen;
     g_screen_frames = 0;
@@ -730,10 +790,10 @@ static void tick(uint32_t frame)
   g_cut_seen = g_stats.frames_cut;
 
   if (g_mode == DSS_DISPLAY_OFF || g_standdown) {
-    /* everything waiting is refused */
+    /* everything waiting is refused, one a frame (the ARM7's send ring is small) */
     if (g_cur.phase != P_FREE)
       finish(&g_cur, DSS_POPUP_DROPPED, g_standdown ? g_standdown : DSS_POPUP_WHY_OFF);
-    while (g_queue_count)
+    else if (g_queue_count)
       finish(&g_queue[--g_queue_count], DSS_POPUP_REFUSED, g_standdown ? g_standdown : DSS_POPUP_WHY_OFF);
     return;
   }
@@ -813,9 +873,14 @@ void dscm_popup_set_mode(uint8_t mode)
   g_table_mode = 0xFF;                         /* rebuild the table for the new mode */
 }
 
-/* Each idle pass, from module_idle with the lock held: the last arming's
- * result, the pop-up's frame tick when a VBlank came, then the band for this
- * frame. Cheap when nothing is up: a few compares. */
+static void update_active(void)
+{
+  dscm_popup_active = (uint8_t)(g_cur.phase != P_FREE || g_queue_count || g_armed);
+}
+
+/* Each idle pass while a pop-up is waiting, up or armed (dscm_popup_active),
+ * from module_idle with the lock held: the last arming's result, the pop-up's
+ * frame tick when a VBlank came, then the band for this frame. */
 void dscm_popup_idle(uint32_t frame)
 {
   collect();
@@ -823,6 +888,7 @@ void dscm_popup_idle(uint32_t frame)
     tick(frame);
   if (g_cur.phase >= P_IN && g_rendered)
     arm();
+  update_active();
 }
 
 /* After the idle pass's own work (network, stream): arm again if an IRQ
@@ -832,6 +898,7 @@ void dscm_popup_rearm(void)
   collect();
   if (g_cur.phase >= P_IN && g_rendered)
     arm();
+  update_active();
 }
 
 void dscm_popup_status(dss_display_status_t* out)

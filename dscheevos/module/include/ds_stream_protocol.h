@@ -260,6 +260,7 @@ typedef struct __attribute__((packed)) {
   uint32_t skip_irq;       /* no VBlank interrupt, or an H-Blank one */
   uint32_t skip_vector;    /* the IRQ vector or the high-vector bit */
   uint32_t skip_screen;    /* the main engine changed screens recently */
-} dss_display_status_t;    /* 56 */
+  uint32_t vector_lost;    /* the IRQ vector changed under an armed band (a soft reset, or the game) */
+} dss_display_status_t;    /* 60; the skips count frames, once per reason */
 
 #endif
