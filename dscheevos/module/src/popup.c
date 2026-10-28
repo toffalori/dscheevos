@@ -634,7 +634,7 @@ static void arm(void)
   /* An IRQ ended this frame's band before its first line: the display FIFO
    * may still hold words the first arming fed it, which a second one in the
    * same frame would show first (proven on hardware only from a new frame). */
-  if (g_mode == DSS_DISPLAY_ON && g_fifo_frame == g_frame)
+  if (g_mode == DSS_DISPLAY_ON && g_fifo_frame == g_frame)   /* DSS_DISPLAY_ON_REARM tries it */
     return;
   /* The per-line DISPCNT table, with IRQs still on (most of a line through
    * the uncached mirror): rebuilt only when the game's value, the band's
@@ -643,7 +643,7 @@ static void arm(void)
   if (g_mode >= DSS_DISPLAY_NOOP && (d & MODE_MASK) == MODE_1
       && (g_table_mode != g_mode || g_table_base != d || g_table_first != first)) {
     for (l = 0; l < 192; l++)
-      g_table[l] = (g_mode == DSS_DISPLAY_ON && l >= first && l <= LAST_LINE) ? ((d & ~MODE_MASK) | MODE_3) : d;
+      g_table[l] = (g_mode >= DSS_DISPLAY_ON && l >= first && l <= LAST_LINE) ? ((d & ~MODE_MASK) | MODE_3) : d;
     dscm_dc_clean(g_table, sizeof(g_table));
     g_table_mode = g_mode;
     g_table_base = d;
@@ -722,7 +722,7 @@ static void arm(void)
       goto out;
     }
     NDMA_CNT(CH_DISPCNT) = NDMA_ON | NDMA_START(0x07) | NDMA_DFIX | NDMA_PHYS(0);
-    if (g_mode == DSS_DISPLAY_ON) {
+    if (g_mode >= DSS_DISPLAY_ON) {
       /* NDMA2: the band's rows (and the margin) into the display FIFO; mode 1
        * lines don't drain it, so it is ready when the band's first line comes.
        * While it slides, the band's lower rows show: it rises from the edge. */
@@ -867,7 +867,7 @@ void dscm_popup_init(void)
 
 void dscm_popup_set_mode(uint8_t mode)
 {
-  if (mode > DSS_DISPLAY_ON)
+  if (mode > DSS_DISPLAY_ON_REARM)
     return;
   g_mode = mode;
   g_table_mode = 0xFF;                         /* rebuild the table for the new mode */

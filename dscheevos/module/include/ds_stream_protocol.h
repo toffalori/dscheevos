@@ -70,6 +70,7 @@
 #define DSS_DISPLAY_DRY     1            /* guards and the IRQ wrapper only: no DMA, nothing on screen */
 #define DSS_DISPLAY_NOOP    2            /* also the DISPCNT writer, with the game's own value on every line */
 #define DSS_DISPLAY_ON      3            /* pop-ups on screen */
+#define DSS_DISPLAY_ON_REARM 4           /* test: on, and armed again in a frame an IRQ ended the band early */
 
 /* DSS_T_CUE body[0]: what the phone unlocked, so the console can blink its LED */
 #define DSS_CUE_UNLOCK      0
