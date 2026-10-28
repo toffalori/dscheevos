@@ -37,6 +37,7 @@ void dscm_irq_wrapper(void) {}
 volatile uint32_t dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs;
 volatile uint32_t dscm_wrap_pass, dscm_wrap_passes, dscm_wrap_woke, dscm_wrap_open;
 volatile uint32_t dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake;
+volatile uint32_t dscm_wrap_words[64];      /* the line path's words (offsets 64..255) */
 uint32_t dscm_cp15_control(void) { return 1u << 13 | 1u << 16; }   /* high vectors, DTCM on */
 uint32_t dscm_dtcm_base(void) { return 0x027C0000u; }
 uint32_t dscm_irq_off(void) { return 0; }
@@ -257,6 +258,154 @@ static void expect_states(const uint8_t* want, int n)
   g_sent_count = 0;
 }
 
+/* ---- the line path ---- */
+
+#define T_DISPOFF  0x02060000u                 /* GX_DispOff in the game's image */
+#define T_DISPMODE 0x020A6084u                 /* its sDispMode */
+#define RAM16(a) (*(uint16_t*)(g_ram + ((a) - 0x02000000u)))
+
+/* The wrapper's VBlank, simulated: the band that was latched counted as up the
+ * whole frame, the next one latched. */
+static void line_vblank(void)
+{
+  if (!LW(LW_STATE))
+    return;
+  LW(LC_VC)++;
+  if (LW(LW_FIRST)) {
+    LW(LC_ARMS)++;
+    LW(LC_WHOLE)++;
+  }
+  LW(LW_FIRST) = LW(LW_NFIRST);
+  LW(LW_LATCHED)++;
+}
+
+/* A pop-up through the line path to its end; 0 if all went as it should. */
+static int line_popup(uint16_t id, int frames_per_tick)
+{
+  const uint8_t life[3] = { DSS_POPUP_QUEUED, DSS_POPUP_SHOWN, DSS_POPUP_DONE };
+  int i, f, saw_band = 0;
+  dscm_popup_on_popup(g_pkt, popup_packet(id, DSS_POPUP_TEST, DSS_POPUP_SMALL, 0, 0, "", "x", "", ""));
+  for (i = 0; i < 2000 && (g_cur.phase != P_FREE || g_queue_count || g_line); i++) {
+    for (f = 0; f < frames_per_tick; f++)
+      line_vblank();
+    t_frame += (uint32_t)frames_per_tick;
+    dscm_popup_idle(t_frame);
+    if (g_line && g_cur.phase == P_HOLD) {
+      if (LW(LW_NFIRST) != 192 - SMALL_ROWS || LW(LW_NWORDS) != (SMALL_ROWS + MARGIN) * 128 || LW(LW_STAGE) != 2) {
+        printf("FAIL: line band %u words %u stage %u\n", LW(LW_NFIRST), LW(LW_NWORDS), LW(LW_STAGE));
+        return 1;
+      }
+      if (g_vector != WRAPPER || !(REG_IE & 4) || !(DISPSTAT & 0x20) || (DISPSTAT >> 8) != LINE_LYC0) {
+        printf("FAIL: line path not installed: vector %08x IE %08x DISPSTAT %04x\n", g_vector, REG_IE, DISPSTAT);
+        return 1;
+      }
+      saw_band = 1;
+    }
+  }
+  if (!saw_band || g_line || g_vector != 0x01FF8000u || (REG_IE & 4) || (DISPSTAT & 0x20)) {
+    printf("FAIL: line pop-up: band %d, installed %d, vector %08x IE %08x DISPSTAT %04x, phase %d\n",
+           saw_band, g_line, g_vector, REG_IE, DISPSTAT, g_cur.phase);
+    return 1;
+  }
+  expect_states(life, 3);
+  return 0;
+}
+
+static int test_line_path(void)
+{
+  uint32_t* p = &RAM32(T_DISPOFF);
+  uint32_t shown, before;
+  int i;
+  /* the game's ARM9 at 0x02004000 (its header); GX_DispOff in it, its two
+   * literals after it */
+  g_header[0x28] = 0x00;
+  g_header[0x29] = 0x40;
+  g_header[0x2A] = 0x00;
+  g_header[0x2B] = 0x02;
+  memcpy(p, k_dispoff, sizeof(k_dispoff));
+  p[2] |= 0x40 - 2 * 4 - 8;                    /* ldr r1, =flag */
+  p[5] |= 0x44 - 5 * 4 - 8;                    /* ldr r0, =sDispMode */
+  p[0x40 / 4] = 0x02099FCCu;
+  p[0x44 / 4] = T_DISPMODE;
+  RAM16(T_DISPMODE) = 1;
+  memset(&g_dispoff, 0, sizeof(g_dispoff));
+  dscm_popup_watch = 1;
+  for (i = 0; i < 400 && !g_dispoff.state; i++)
+    dscm_popup_idle(t_frame);
+  if (g_dispoff.state != 1 || g_dispoff.mode != T_DISPMODE) {
+    printf("FAIL: GX_DispOff: state %d sDispMode %08x\n", g_dispoff.state, g_dispoff.mode);
+    return 1;
+  }
+
+  /* a pop-up through the line path, a tick a frame; then a 30 fps game, a
+   * tick every second frame: as many frames shown */
+  dscm_popup_set_mode(DSS_DISPLAY_ON);
+  REG16(0x04000006) = 100;
+  before = g_stats.frames_shown;
+  if (line_popup(10, 1))
+    return 1;
+  shown = g_stats.frames_shown - before;
+  before = g_stats.frames_shown;
+  if (line_popup(11, 2))
+    return 1;
+  if (g_stats.frames_shown - before < shown - 2 || g_stats.frames_shown - before > shown + 2) {
+    printf("FAIL: 30 fps: %u frames shown, %u at 60\n", g_stats.frames_shown - before, shown);
+    return 1;
+  }
+  printf("line: %u frames shown a pop-up\n", shown);
+
+  /* the leak watch: mode 3 with no band of ours, GX_DispOff's saved mode 3 */
+  DISPCNT = (DISPCNT & ~MODE_MASK) | MODE_3;
+  RAM16(T_DISPMODE) = 3;
+  before = g_stats.line_leak;
+  dscm_popup_idle(t_frame);
+  if ((DISPCNT & MODE_MASK) != MODE_1 || RAM16(T_DISPMODE) != 1 || g_stats.line_leak != before + 1 || g_stats.dispmode_fixed != 1) {
+    printf("FAIL: leak watch: DISPCNT %08x sDispMode %u\n", DISPCNT, RAM16(T_DISPMODE));
+    return 1;
+  }
+
+  /* the game takes the VCOUNT IRQ (the wrapper stands down): the line path
+   * goes, leaving the game's VCOUNT setup alone, and the idle-armed path
+   * takes over for the game */
+  dscm_popup_on_popup(g_pkt, popup_packet(12, DSS_POPUP_TEST, DSS_POPUP_SMALL, 0, 0, "", "x", "", ""));
+  for (i = 0; i < 40 && !g_line; i++) {
+    line_vblank();
+    dscm_popup_idle(++t_frame);
+  }
+  if (!g_line) { printf("FAIL: line path not installed again\n"); return 1; }
+  LW(LW_OWN) = 0;
+  line_vblank();
+  dscm_popup_idle(++t_frame);
+  if (g_line || !g_line_off || g_vector != 0x01FF8000u || !(REG_IE & 4)) {
+    printf("FAIL: stand-down: installed %d off %d vector %08x IE %08x\n", g_line, g_line_off, g_vector, REG_IE);
+    return 1;
+  }
+  REG_IE &= ~4u;
+  DISPSTAT = (uint16_t)(DISPSTAT & ~0x20);
+  g_line_off = 0;
+  g_cur.phase = P_FREE;
+  g_queue_count = 0;
+  g_sent_count = 0;
+  end_band();
+  /* a game with its own VCOUNT IRQ: no line path */
+  REG_IE |= 4;
+  dscm_popup_on_popup(g_pkt, popup_packet(13, DSS_POPUP_TEST, DSS_POPUP_SMALL, 0, 0, "", "x", "", ""));
+  for (i = 0; i < 40; i++) {
+    line_vblank();
+    dscm_popup_idle(++t_frame);
+  }
+  if (g_line) { printf("FAIL: line path over a game's VCOUNT IRQ\n"); return 1; }
+  REG_IE &= ~4u;
+  g_cur.phase = P_FREE;
+  g_queue_count = 0;
+  g_sent_count = 0;
+  end_band();
+  /* the rest of the test: the idle-armed path (no GX_DispOff found) */
+  g_header[0x28] = g_header[0x29] = g_header[0x2A] = g_header[0x2B] = 0;
+  memset(&g_dispoff, 0, sizeof(g_dispoff));
+  return 0;
+}
+
 int main(int argc, char** argv)
 {
   char path[512];
@@ -446,6 +595,8 @@ int main(int argc, char** argv)
   g_sent_count = 0;
   end_band();
   fake_dispatcher(0);
+  if (test_line_path())
+    return 1;
 
   /* fuzz: random, truncated and mutated packets must never write out of bounds */
   srand(1);

@@ -282,7 +282,29 @@ typedef struct __attribute__((packed)) {
   uint8_t  dispatcher;     /* the game's IRQ dispatcher at the last arming: bits 0-3 its NitroSDK variant (1 V1,
                               2 V2, 0 not recognised), 0x10 its ThreadSwitch from SDK 3.x/4.x, 0x20 from SDK 2.0
                               (passing needs one of those two) */
-} dss_display_status_t;    /* 96; the skips count frames, once per reason */
+  /* the line path (the band switched on by our own VCOUNT IRQ every frame, up
+     through the game's IRQs and threads; frames_shown, frames_cut and arms count
+     its bands too) */
+  uint8_t  line;           /* 0 not installed, 1 installed, 2 left to the game for good (its VCOUNT IRQ) */
+  uint8_t  line_stage;     /* 0 watch (our VCOUNT IRQ only), 1 dry (the feed, the game's mode written), 2 on */
+  uint8_t  line_standdown; /* why the VCOUNT IRQ was left to the game: 1 LYC changed, 2 LYC bit 8, 3 its
+                              table slot changed, 4 it kept turning ours off */
+  uint8_t  line_skipwhy;   /* guards that held a band back (bits): 1 no VBlank IRQ, 2 an H-Blank IRQ, 4 display
+                              mode or forced blank, 8 fade or capture, 16 the other screen, 32 NDMA2 busy, 64 a
+                              legacy DMA feeding the FIFO */
+  uint32_t line_vc;        /* our VCOUNT IRQs */
+  uint32_t line_late;      /* too late in the line for that frame */
+  uint32_t line_skip;      /* held back by a guard */
+  uint32_t line_leak;      /* mode 3 with no band of ours up, put back to 1 (at an IRQ or an idle pass) */
+  uint32_t line_mode0;     /* a band ended in display mode 0 (a GX_DispOff during it) */
+  uint32_t line_reassert;  /* our VCOUNT IRQ's enables put back after the game cleared them */
+  uint32_t line_ended;     /* bands ended early: IPC sync (nds-bootstrap's menu, reset), an IRQ in VBlank */
+  uint16_t line_latency;   /* the most lines from LYC to our VCOUNT IRQ */
+  uint16_t line_spin;      /* the most spin loops to the band's H-Blank */
+  uint16_t dispmode_fixed; /* GX_DispOff's saved mode found 3 and put back to 1 */
+  uint8_t  dispoff;        /* GX_DispOff in the game: 0 looking, 1 found, 2 not found */
+  uint8_t  reserved7;
+} dss_display_status_t;    /* 136; the skips count frames, once per reason */
 
 /* DSS_T_CODE: 48 bytes of the game's IRQ dispatcher code, sent once a game
  * (the dispatcher and OS_IrqHandler_ThreadSwitch), so an unrecognised one

@@ -415,6 +415,43 @@ dscm_dtcm_base:
 	.equ	WRAP_FLAGS, 48
 	.equ	IPC_RECV, 0x40000           @ IE/IF: IPC receive FIFO not empty
 	.equ	PASS_LINES, 191             @ passing only before this line (popup.c LAST_LINE + 1)
+	@ the line path's words (popup.c LW_*), lines three to six
+	.equ	L_STATE, 64                 @ 1: the line path is installed (popup.c)
+	.equ	L_STAGE, 68                 @ 0 watch only, 1 dry (the feed, and mode 1 written), 2 on (mode 3)
+	.equ	L_UP, 72                    @ our band is up in this frame
+	.equ	L_OWN, 76                   @ we own the VCOUNT IRQ (0: stood down for the game)
+	.equ	L_NFIRST, 80                @ the next frame's band (popup.c; latched at VBlank): first line, 0 none
+	.equ	L_NSRC, 84                  @ its feed's source,
+	.equ	L_NWORDS, 88                @ word count,
+	.equ	L_NSCREEN, 92               @ and POWCNT1 bit 15 it was drawn for
+	.equ	L_FIRST, 96                 @ this frame's, as latched
+	.equ	L_SRC, 100
+	.equ	L_WORDS, 104
+	.equ	L_SCREEN, 108
+	.equ	L_LYC, 112                  @ the LYC we wrote last
+	.equ	L_BIOS_LR, 116              @ the BIOS's return while lr serves as a scratch register
+	.equ	L_LATCHED, 120              @ VBlanks seen (a latch happened)
+	.equ	C_VC, 128                   @ counters: our VCOUNT IRQs
+	.equ	C_ARMS, 132                 @ bands switched on
+	.equ	C_WHOLE, 136                @ bands that lasted to the VBlank
+	.equ	C_CUT, 140                  @ ended by a game write of the mode
+	.equ	C_LATE, 144                 @ too late in the line for this frame
+	.equ	C_SKIP, 148                 @ held back by a guard
+	.equ	C_LEAK, 152                 @ mode 3 found while no band was up: mode 1 put back
+	.equ	C_MODE0, 156                @ display mode 0 at a band's end (a GX_DispOff during it)
+	.equ	C_REASSERT, 160             @ the VCOUNT IRQ's enables put back after the game cleared them
+	.equ	C_ENDED, 164                @ bands ended early (IPC sync, an IRQ in the VBlank lines)
+	.equ	C_LATENCY, 168              @ the most lines between LYC and our VCOUNT IRQ's entry
+	.equ	C_SPIN, 172                 @ the most spin loops to the band's H-Blank
+	.equ	C_STANDDOWN, 176            @ why we stopped owning the VCOUNT IRQ: 1 LYC changed, 2 LYC bit 8
+	.equ	C_SKIPWHY, 180              @ guard bits seen (popup.c LINE_SKIP_*)
+	.equ	L_T2ADDR, 192               @ seventh line: &OS_IRQTable[2] (the game's VCOUNT handler slot)
+	.equ	L_T2VAL, 196                @ what it held at install: a change means the game wants VCOUNT
+	.equ	L_NEXPIRE, 200              @ L_LATCHED after which the parameters are stale (popup.c stopped
+	                                    @ refreshing them: no idle time): no band
+	.equ	L_LYC2, 204                 @ the LYC we wrote before L_LYC (a game DISPSTAT RMW may put it back)
+	.equ	SPIN_MAX, 4096
+	.equ	REASSERT_MAX, 64            @ the game keeps turning our VCOUNT IRQ off: leave it to the game
 
 @ Our channels off and mode 1 back; r12 = 0x04000000 on entry; r1-r3, r12 change.
 	.macro	STOP_BAND
@@ -460,6 +497,9 @@ dscm_dtcm_base:
 	.type dscm_irq_wrapper, %function
 dscm_irq_wrapper:
 	adr	r3, dscm_wrap_orig          @ r3: our words (WRAP_*)
+	ldr	r1, [r3, #L_STATE]
+	cmp	r1, #0
+	bne	line_path                   @ the line path: we stay on the vector (below the words)
 	ldr	r1, [r3, #WRAP_ORIG]
 	str	r1, [r0, #-4]               @ the game's handler back on the vector, first
 	mov	r12, #0x04000000
@@ -567,7 +607,9 @@ dscm_irq_wrapper:
 	.global dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs
 	.global dscm_wrap_pass, dscm_wrap_passes, dscm_wrap_woke, dscm_wrap_open
 	.global dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake
-	.balign	32                          @ two cache lines for the words
+	.global dscm_wrap_words
+	.balign	32                          @ six cache lines for the words
+dscm_wrap_words:                        @ all of them, as an array (popup.c's line path)
 dscm_wrap_orig:
 	.word	0                           @ the game's IRQ handler, saved at arming
 dscm_wrap_hits:
@@ -594,6 +636,354 @@ dscm_wrap_wake:
 	.word	0                           @ SDK 2.0: the IRQ wake bits' halfword ThreadSwitch reads, else 0
 	.word	0                           @ WRAP_FLAGS
 	.word	0, 0, 0
+	.space	192                         @ L_* and C_*: the line path
+
+@ ---- the line path (popup.c installs it when the game leaves the VCOUNT IRQ
+@ unused) ----
+@ While a pop-up is up the wrapper stays on the vector. Our own VCOUNT IRQ,
+@ at LYC = the band's first line - 2, starts the feed (NDMA2 into the display
+@ FIFO) and, at the H-Blank of the line before the band, writes display mode 3
+@ into DISPCNT byte 2 by a CPU read-modify-write: only the mode bits change.
+@ The band then runs to line 191 through every IRQ and while game threads
+@ run; the VBlank IRQ puts mode 1 back before the game's handler runs. A
+@ game RMW of DISPCNT in between keeps our mode and its own change; an
+@ absolute write ends the band for the frame. Mode 3 found while no band of
+@ ours is up (a thread RMW that straddled the VBlank, or GX_DispOn writing
+@ back a mode GX_DispOff saved during a band) is put back to 1 at any IRQ. IPC
+@ sync (nds-bootstrap's in-game menu and reset, which may not return) and any
+@ IRQ in the VBlank lines end a band first. Every path ends in the game's
+@ handler with r0 and lr as the BIOS left them; nothing goes on the stack and
+@ IRQs stay masked. r3 = our words on entry (from the wrapper's first line).
+line_path:
+	str	lr, [r3, #L_BIOS_LR]        @ lr serves as scratch until the chain
+	mov	r12, #0x04000000
+	ldr	r2, [r12, #0x210]
+	ldr	r1, [r12, #0x214]
+	and	r2, r2, r1                  @ r2: IE & IF
+	ldr	r1, [r3, #L_UP]
+	cmp	r1, #0
+	bne	1f
+	ldrb	r1, [r12, #2]               @ mode 3 with no band of ours up: mode 1 back (bit 1 of byte 2)
+	tst	r1, #1
+	tstne	r1, #2
+	beq	1f
+	bic	r1, r1, #2
+	strb	r1, [r12, #2]
+	ldr	r1, [r3, #C_LEAK]
+	add	r1, r1, #1
+	str	r1, [r3, #C_LEAK]
+1:	tst	r2, #1                      @ VBlank first: a VCOUNT match pending with it is stale
+	bne	line_vblank
+	tst	r2, #4
+	bne	line_vcount
+	ldr	r1, [r3, #L_UP]
+	cmp	r1, #0
+	beq	line_chain
+	tst	r2, #0x10000                @ IPC sync: its handler may never come back
+	bne	2f
+	ldrh	r1, [r12, #6]
+	cmp	r1, #192                    @ in the VBlank lines, the VBlank IRQ still to come
+	blo	line_chain
+2:	bl	band_down
+	ldr	r1, [r3, #C_ENDED]
+	add	r1, r1, #1
+	str	r1, [r3, #C_ENDED]
+	b	line_chain
+
+@ The band down: mode 1 back if 3, our feed off, L_UP 0. r3 = words, r12 =
+@ 0x04000000; r1, r2 change.
+band_down:
+	mov	r1, #0
+	str	r1, [r3, #L_UP]
+	ldrb	r1, [r12, #2]
+	tst	r1, #1
+	tstne	r1, #2
+	bicne	r1, r1, #2
+	strbne	r1, [r12, #2]
+	add	r2, r12, #0x4100
+	ldr	r1, [r2, #0x40]             @ NDMA2DAD: ours feeds DISP_MMEM_FIFO
+	sub	r1, r1, #0x04000000
+	cmp	r1, #0x68
+	moveq	r1, #0
+	streq	r1, [r2, #0x54]             @ NDMA2CNT off (it stalls once mode 3 is gone)
+	bx	lr
+
+line_vcount:
+	ldr	r1, [r3, #L_OWN]
+	cmp	r1, #0
+	beq	line_chain                  @ not ours any more: the game's handler takes it
+	mov	r1, #4
+	str	r1, [r12, #0x214]           @ acknowledged: the game's dispatcher never sees ours
+	ldr	r1, [r3, #C_VC]
+	add	r1, r1, #1
+	str	r1, [r3, #C_VC]
+	ldrh	r1, [r12, #6]
+	ldr	r2, [r3, #L_LYC]
+	sub	r1, r1, r2                  @ lines after LYC (a VCOUNT before it reads huge)
+	ldr	r2, [r3, #C_LATENCY]
+	cmp	r1, r2
+	strhi	r1, [r3, #C_LATENCY]
+	cmp	r1, #2
+	bhi	line_chain                  @ not at our line (a stale match): nothing this frame
+	ldr	r1, [r3, #L_FIRST]
+	cmp	r1, #0
+	beq	line_chain                  @ no band this frame
+	ldr	r1, [r3, #L_STAGE]
+	cmp	r1, #0
+	beq	line_chain                  @ watching only
+	@ guards; r0 holds the reason bit (put back at the chain)
+	mov	r0, #1
+	ldr	r1, [r12, #0x210]           @ IE
+	ldrh	r2, [r12, #4]               @ DISPSTAT
+	tst	r1, #1                      @ no VBlank IRQ: nothing would put mode 1 back
+	beq	line_skip
+	tst	r2, #8
+	beq	line_skip
+	mov	r0, #2
+	tst	r1, #2                      @ an H-Blank IRQ: the spin would hold it off
+	tstne	r2, #0x10
+	bne	line_skip
+	mov	r0, #4
+	ldr	r1, [r12]                   @ DISPCNT: mode 1, no forced blank
+	tst	r1, #0x80
+	bne	line_skip
+	and	r2, r1, #0x30000
+	cmp	r2, #0x10000
+	bne	line_skip
+	mov	r0, #8
+	ldrh	r1, [r12, #0x6C]            @ MASTER_BRIGHT: a fade would hide it anyway
+	tst	r1, #0xC000
+	tstne	r1, #0x1F
+	bne	line_skip
+	ldr	r1, [r12, #0x64]            @ DISPCAPCNT: a capture on
+	tst	r1, #0x80000000
+	bne	line_skip
+	mov	r0, #16
+	add	r1, r12, #0x300
+	ldrh	r1, [r1, #4]                @ POWCNT1: engine A on the screen the band was drawn for
+	and	r1, r1, #0x8000
+	ldr	r2, [r3, #L_SCREEN]
+	cmp	r1, r2
+	bne	line_skip
+	mov	r0, #32
+	add	r1, r12, #0x4100
+	ldr	r2, [r1, #0x54]             @ NDMA2: busy (a copy, or a feed not stopped)
+	tst	r2, #0x80000000
+	bne	line_skip
+	mov	r0, #64                     @ a legacy DMA in main-memory display mode: the game feeds the FIFO
+	ldr	r1, [r12, #0xB8]
+	and	r1, r1, #0xB8000000
+	cmp	r1, #0xA0000000
+	beq	line_skip
+	ldr	r1, [r12, #0xC4]
+	and	r1, r1, #0xB8000000
+	cmp	r1, #0xA0000000
+	beq	line_skip
+	ldr	r1, [r12, #0xD0]
+	and	r1, r1, #0xB8000000
+	cmp	r1, #0xA0000000
+	beq	line_skip
+	ldr	r1, [r12, #0xDC]
+	and	r1, r1, #0xB8000000
+	cmp	r1, #0xA0000000
+	beq	line_skip
+	@ the feed only before line first-1's H-Blank: never a late start
+	ldr	r0, [r3, #L_FIRST]
+	sub	r0, r0, #1                  @ r0: the line whose H-Blank switches the mode
+	ldrh	r1, [r12, #6]
+	cmp	r1, r0
+	bhi	line_late
+	bne	3f
+	ldrh	r1, [r12, #4]
+	tst	r1, #2
+	bne	line_late
+3:	add	r2, r12, #0x4100            @ NDMA2: the rows into the display FIFO, from the first mode-3 line
+	mov	r1, #0
+	str	r1, [r2, #0x54]
+	ldr	r1, [r3, #L_SRC]
+	str	r1, [r2, #0x3C]
+	add	r1, r12, #0x68
+	str	r1, [r2, #0x40]
+	ldr	r1, [r3, #L_WORDS]
+	str	r1, [r2, #0x44]
+	mov	r1, #4
+	str	r1, [r2, #0x48]
+	mov	r1, #0
+	str	r1, [r2, #0x4C]
+	mov	r1, #0x89000000             @ on, startup 09h (main-memory display), 4-word blocks, fixed destination
+	orr	r1, r1, #0x00020000
+	orr	r1, r1, #0x00000800
+	str	r1, [r2, #0x54]
+	mov	r2, #SPIN_MAX               @ to line first-1's H-Blank (bounded)
+4:	ldrh	r1, [r12, #6]
+	cmp	r1, r0
+	bhi	5f                          @ past it
+	bne	6f
+	ldrh	r1, [r12, #4]
+	tst	r1, #2
+	bne	7f
+6:	subs	r2, r2, #1
+	bne	4b
+5:	add	r2, r12, #0x4100            @ too late: the feed off again (no mode-3 line has drawn from it)
+	mov	r1, #0
+	str	r1, [r2, #0x54]
+	b	line_late
+7:	ldrb	r1, [r12, #2]               @ the mode switch, byte 2 only
+	bic	r1, r1, #3
+	ldr	r0, [r3, #L_STAGE]
+	cmp	r0, #2
+	orreq	r1, r1, #3                  @ on: main-memory display from the next line
+	orrne	r1, r1, #1                  @ dry: the game's own mode written back
+	strb	r1, [r12, #2]
+	mov	r1, #1
+	str	r1, [r3, #L_UP]
+	ldr	r1, [r3, #C_ARMS]
+	add	r1, r1, #1
+	str	r1, [r3, #C_ARMS]
+	rsb	r2, r2, #SPIN_MAX           @ loops spent
+	ldr	r1, [r3, #C_SPIN]
+	cmp	r2, r1
+	strhi	r2, [r3, #C_SPIN]
+	b	line_chain
+line_late:
+	ldr	r1, [r3, #C_LATE]
+	add	r1, r1, #1
+	str	r1, [r3, #C_LATE]
+	b	line_chain
+line_skip:
+	ldr	r1, [r3, #C_SKIP]
+	add	r1, r1, #1
+	str	r1, [r3, #C_SKIP]
+	ldr	r1, [r3, #C_SKIPWHY]
+	orr	r1, r1, r0
+	str	r1, [r3, #C_SKIPWHY]
+	b	line_chain
+
+line_vblank:
+	tst	r2, #4                      @ our VCOUNT match too, held off past the band: dropped
+	beq	5f
+	ldr	r1, [r3, #L_OWN]
+	cmp	r1, #0
+	movne	r1, #4
+	strne	r1, [r12, #0x214]
+5:	ldr	r1, [r3, #L_UP]
+	cmp	r1, #0
+	beq	2f
+	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
+	and	r1, r1, #3
+	ldr	r0, [r3, #L_STAGE]
+	cmp	r0, #2
+	moveq	r0, #3
+	movne	r0, #1
+	cmp	r1, r0
+	beq	1f
+	ldr	r2, [r3, #C_CUT]            @ the game wrote the mode during the band
+	add	r2, r2, #1
+	str	r2, [r3, #C_CUT]
+	cmp	r1, #0
+	ldreq	r2, [r3, #C_MODE0]          @ display mode 0: a GX_DispOff saw our mode
+	addeq	r2, r2, #1
+	streq	r2, [r3, #C_MODE0]
+	b	3f
+1:	ldr	r2, [r3, #C_WHOLE]
+	add	r2, r2, #1
+	str	r2, [r3, #C_WHOLE]
+3:	bl	band_down
+2:	ldr	r1, [r3, #L_NFIRST]         @ the next frame's band, latched
+	str	r1, [r3, #L_FIRST]
+	ldr	r1, [r3, #L_NSRC]
+	str	r1, [r3, #L_SRC]
+	ldr	r1, [r3, #L_NWORDS]
+	str	r1, [r3, #L_WORDS]
+	ldr	r1, [r3, #L_NSCREEN]
+	str	r1, [r3, #L_SCREEN]
+	ldr	r1, [r3, #L_LATCHED]
+	add	r1, r1, #1
+	str	r1, [r3, #L_LATCHED]
+	ldr	r2, [r3, #L_NEXPIRE]
+	subs	r2, r1, r2                  @ popup.c hasn't refreshed them in time (no idle time): no band
+	movgt	r1, #0
+	strgt	r1, [r3, #L_FIRST]
+	ldr	r1, [r3, #L_OWN]
+	cmp	r1, #0
+	beq	line_chain
+	ldr	r1, [r3, #L_T2ADDR]         @ the game's VCOUNT handler slot changed: it wants the IRQ
+	ldr	r1, [r1]
+	ldr	r2, [r3, #L_T2VAL]
+	cmp	r1, r2
+	movne	r0, #3
+	bne	line_standdown
+	ldr	r1, [r3, #C_REASSERT]       @ the game keeps turning it off
+	cmp	r1, #REASSERT_MAX
+	movhs	r0, #4
+	bhs	line_standdown
+	ldrb	r1, [r12, #4]
+	tst	r1, #0x80                   @ LYC bit 8: not a line we'd write
+	movne	r0, #2
+	bne	line_standdown
+	ldrb	r1, [r12, #5]               @ LYC as we left it (or the one before, put back by a game
+	ldr	r2, [r3, #L_LYC]            @ DISPSTAT RMW that straddled our write)? Else the game set it
+	cmp	r1, r2
+	ldrne	r2, [r3, #L_LYC2]
+	cmpne	r1, r2
+	movne	r0, #1
+	bne	line_standdown
+	ldr	r1, [r3, #L_FIRST]
+	cmp	r1, #0
+	beq	3f
+	sub	r1, r1, #2                  @ LYC = the band's first line - 2
+	ldr	r2, [r3, #L_LYC]
+	cmp	r1, r2
+	strne	r2, [r3, #L_LYC2]
+	strne	r1, [r3, #L_LYC]
+	ldrh	r2, [r12, #4]               @ DISPSTAT (16-bit): LYC in bits 8-15, the rest as read
+	and	r2, r2, #0xFF
+	orr	r2, r2, r1, lsl #8
+	strh	r2, [r12, #4]
+3:	ldrh	r1, [r12, #4]
+	tst	r1, #0x20
+	bne	4f
+	mov	r2, #4                      @ the game turned our VCOUNT IRQ off: a stale match first cleared
+	str	r2, [r12, #0x214]
+	orr	r1, r1, #0x20
+	strh	r1, [r12, #4]
+	ldr	r2, [r3, #C_REASSERT]
+	add	r2, r2, #1
+	str	r2, [r3, #C_REASSERT]
+4:	ldr	r1, [r12, #0x210]
+	tst	r1, #4
+	bne	line_chain
+	mov	r2, #4
+	str	r2, [r12, #0x214]
+	orr	r1, r1, #4
+	str	r1, [r12, #0x210]
+	ldr	r2, [r3, #C_REASSERT]
+	add	r2, r2, #1
+	str	r2, [r3, #C_REASSERT]
+	b	line_chain
+line_standdown:
+	mov	r1, #0
+	str	r1, [r3, #L_OWN]
+	str	r0, [r3, #C_STANDDOWN]
+
+line_chain:                          @ our lines to RAM, r0 and lr as the BIOS left them, the game's handler
+	add	r1, r3, #64
+	mcr	p15, 0, r1, c7, c10, 1
+	add	r1, r3, #96
+	mcr	p15, 0, r1, c7, c10, 1
+	add	r1, r3, #128
+	mcr	p15, 0, r1, c7, c10, 1
+	add	r1, r3, #160
+	mcr	p15, 0, r1, c7, c10, 1
+	add	r1, r3, #192
+	mcr	p15, 0, r1, c7, c10, 1
+	ldr	lr, [r3, #L_BIOS_LR]
+	mrc	p15, 0, r0, c9, c1, 0
+	lsr	r0, r0, #12
+	lsl	r0, r0, #12
+	add	r0, r0, #0x4000
+	ldr	r1, [r3, #WRAP_ORIG]
+	bx	r1
 	.size dscm_irq_wrapper, . - dscm_irq_wrapper
 
 @ uint32_t dscm_cp15_control(void): CP15 c1, the control register (bit 13:

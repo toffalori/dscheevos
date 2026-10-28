@@ -564,28 +564,29 @@ static void render(void)
 
 /* ---- the strip ---- */
 
-/* words from src to dst (physical addresses) by DMA at once, NDMA2 while no
- * band is armed; 1 when done. Bounded. */
+/* words from src to dst (physical addresses) by DMA at once, NDMA3 while no
+ * band is armed (the line path's VCOUNT IRQ may start NDMA2, the feed, at any
+ * time; NDMA3 is free on that path); 1 when done. Bounded. */
 static int dma_copy(uint32_t src, uint32_t dst, uint32_t words)
 {
   int i;
-  if (NDMA_CNT(CH_FIFO) & NDMA_ON)
+  if (NDMA_CNT(CH_DISPCNT) & NDMA_ON)
     return 0;
-  NDMA_SAD(CH_FIFO) = src;
-  NDMA_DAD(CH_FIFO) = dst;
-  NDMA_WCNT(CH_FIFO) = words;
-  NDMA_BCNT(CH_FIFO) = 0;
-  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(3);
-  for (i = 0; i < 200000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
-  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
-    NDMA_CNT(CH_FIFO) = 0;
+  NDMA_SAD(CH_DISPCNT) = src;
+  NDMA_DAD(CH_DISPCNT) = dst;
+  NDMA_WCNT(CH_DISPCNT) = words;
+  NDMA_BCNT(CH_DISPCNT) = 0;
+  NDMA_CNT(CH_DISPCNT) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(3);
+  for (i = 0; i < 200000 && (NDMA_CNT(CH_DISPCNT) & NDMA_ON); i++) {}
+  if (NDMA_CNT(CH_DISPCNT) & NDMA_ON) {
+    NDMA_CNT(CH_DISPCNT) = 0;
     return 0;
   }
   return 1;
 }
 
-/* g_band (cleaned) into the NWRAM window by DMA, NDMA2 while no band is
- * armed; 1 if a few words read back by DMA match. */
+/* g_band (cleaned) into the NWRAM window by DMA while no band is up; 1 if a
+ * few words read back by DMA match. */
 static int copy_to_nwram(void)
 {
   static uint32_t check[8] __attribute__((aligned(32)));
@@ -1049,6 +1050,287 @@ out:
   dscm_irq_restore(cpsr);
 }
 
+/* ---- the line path (start.s line_path) ----
+ * The band switched on by our own VCOUNT IRQ every frame, whether the game
+ * idles or not, and left up through every IRQ and game thread until the
+ * VBlank (start.s describes the IRQ side). This side installs it when the
+ * game leaves the VCOUNT IRQ unused, publishes each frame's band (the
+ * wrapper latches it at the VBlank), takes it down again, and watches for
+ * our mode leaking into the game: DISPCNT mode 3 with no band up, and
+ * GX_DispOff's saved mode (sDispMode) reading 3, both put back to 1. */
+
+/* start.s: the wrapper's words as one array; the line path's part, at the
+ * offsets of start.s's L_* and C_*. */
+extern volatile uint32_t dscm_wrap_words[64];
+#define LW(off) dscm_wrap_words[(off) / 4]
+enum {
+  LW_STATE = 64, LW_STAGE = 68, LW_UP = 72, LW_OWN = 76, LW_NFIRST = 80, LW_NSRC = 84, LW_NWORDS = 88,
+  LW_NSCREEN = 92, LW_FIRST = 96, LW_LYC = 112, LW_LATCHED = 120,
+  LC_VC = 128, LC_ARMS = 132, LC_WHOLE = 136, LC_CUT = 140, LC_LATE = 144, LC_SKIP = 148, LC_LEAK = 152,
+  LC_MODE0 = 156, LC_REASSERT = 160, LC_ENDED = 164, LC_LATENCY = 168, LC_SPIN = 172, LC_STANDDOWN = 176,
+  LC_SKIPWHY = 180, LW_T2ADDR = 192, LW_T2VAL = 196, LW_NEXPIRE = 200, LW_LYC2 = 204,
+};
+#define LC_COUNT     10                        /* LC_VC .. LC_ENDED, read as deltas each tick */
+#define LINE_EXPIRE  120                       /* frames a published band stays good without the idle pass */
+#define LINE_LYC0    150                       /* LYC before the first band */
+#define CODE16(a) (*(volatile uint16_t*)POPUP_CODE(a))
+
+uint8_t dscm_popup_watch = 1;                  /* module.c calls in with no pop-up too: the GX_DispOff scan, the leak watch */
+static uint8_t  g_line;                        /* the line path is installed */
+static uint8_t  g_line_off;                    /* left to the game's VCOUNT use: the idle-armed path for the game */
+static uint8_t  g_line_used;                   /* a line path went up in this game: the leak watch from then on */
+static uint32_t g_line_seen[LC_COUNT];         /* the counters at the last tick */
+
+/* GX_DispOff, word for word in NitroSDK 2.0 (Super Mario 64 DS) and 4.x
+ * (Pokemon HG, Platinum): DISPCNT's mode bits saved in sDispMode (ldr r0,=),
+ * mode 0 written; GX_DispOn writes sDispMode back. One run during a band of
+ * ours saves 3; that is put back to 1 at the next idle pass, so the next
+ * GX_DispOn doesn't show an unfed main-memory display. The masked words are
+ * literal offsets. */
+static const uint32_t k_dispoff[11] = {
+  0xE3A0E301, 0xE59EC000, 0xE59F1000, 0xE20C2803, 0xE3A03000, 0xE59F0000, 0xE1A02822, 0xE1C130B0,
+  0xE1C020B0, 0xE3CC0803, 0xE58E0000,
+};
+#define K_DISPOFF_MASKED ((1u << 2) | (1u << 5))
+#define DISPOFF_STEP     2048                  /* words scanned per idle pass */
+static struct {
+  uint32_t at, end;                            /* the scan through the game's ARM9 image */
+  uint32_t mode;                               /* sDispMode, 0 if not found */
+  uint8_t  state;                              /* 0 scanning, 1 found, 2 not found */
+} g_dispoff;
+
+/* One step of the scan for GX_DispOff in the game's ARM9 image (from its
+ * header's load address, up to 2 MB within the first 4 MB of main RAM). */
+static void dispoff_scan(void)
+{
+  uint32_t a, end, i;
+  if (g_dispoff.state)
+    return;
+  if (!g_dispoff.end) {
+    const volatile uint8_t* h = (const volatile uint8_t*)(uintptr_t)POPUP_NDS_HEADER;
+    const uint32_t load = (uint32_t)h[0x28] | (uint32_t)h[0x29] << 8 | (uint32_t)h[0x2A] << 16 | (uint32_t)h[0x2B] << 24;
+    if (load - 0x02000000u >= 0x003C0000u || (load & 3)) {
+      g_dispoff.state = 2;
+      return;
+    }
+    g_dispoff.at = load;
+    g_dispoff.end = load + 0x00200000u < 0x023C0000u ? load + 0x00200000u : 0x023C0000u;
+  }
+  end = g_dispoff.at + DISPOFF_STEP * 4 < g_dispoff.end ? g_dispoff.at + DISPOFF_STEP * 4 : g_dispoff.end;
+  for (a = g_dispoff.at; a < end; a += 4) {
+    if (CODE32(a) != k_dispoff[0])
+      continue;
+    for (i = 1; i < 11 && (CODE32(a + i * 4) & ((K_DISPOFF_MASKED >> i) & 1 ? 0xFFFFF000u : 0xFFFFFFFFu)) == k_dispoff[i]; i++) {}
+    if (i < 11)
+      continue;
+    {
+      const uint32_t mode = CODE32(a + 5 * 4 + 8 + (CODE32(a + 5 * 4) & 0xFFF));
+      const uint32_t other = CODE32(a + 2 * 4 + 8 + (CODE32(a + 2 * 4) & 0xFFF));
+      if (mode - 0x02000000u < 0x003C0000u && !(mode & 1) && mode != other) {
+        g_dispoff.mode = mode;
+        g_dispoff.state = 1;
+        return;
+      }
+    }
+  }
+  g_dispoff.at = end;
+  if (end >= g_dispoff.end)
+    g_dispoff.state = 2;
+}
+
+static int line_wanted(void)
+{
+  return g_mode >= DSS_DISPLAY_DRY && g_mode <= DSS_DISPLAY_ON && !g_line_off && !g_standdown;
+}
+
+/* 0 watch (our VCOUNT IRQ only), 1 dry (the feed, and the game's own mode
+ * written), 2 on */
+static uint32_t line_stage(void)
+{
+  return g_mode == DSS_DISPLAY_ON ? 2 : g_mode == DSS_DISPLAY_NOOP ? 1 : 0;
+}
+
+/* From the idle pass, once a line path has been up in this game: mode 3
+ * with no band of ours up (a game RMW straddled our VBlank write, or
+ * GX_DispOn wrote back a leaked mode) and sDispMode reading 3, put back to 1.
+ * The wrapper does the first at every IRQ while installed. */
+static void leak_watch(void)
+{
+  uint32_t cpsr;
+  if (!g_line_used)
+    return;
+  cpsr = dscm_irq_off();
+  if (!(g_line && LW(LW_UP)) && (DISPCNT & MODE_MASK) == MODE_3) {
+    DISPCNT_MODE = (uint8_t)(DISPCNT_MODE & ~2);
+    g_stats.line_leak++;
+  }
+  if (g_dispoff.mode && CODE16(g_dispoff.mode) == 3) {
+    CODE16(g_dispoff.mode) = 1;
+    g_stats.dispmode_fixed++;
+  }
+  dscm_irq_restore(cpsr);
+}
+
+/* The line path on, with IRQs masked: the wrapper on the vector for good,
+ * the VCOUNT IRQ ours (IF first cleared, so no stale match fires). Only when
+ * the game leaves the VCOUNT IRQ alone, its VBlank IRQ is on, no H-Blank IRQ
+ * runs (the spin would hold it off), its dispatcher is NitroSDK's (for the
+ * VCOUNT slot of its table) and GX_DispOff is known. 1 if installed. */
+static int line_install(void)
+{
+  volatile uint32_t* vec = irq_vector();
+  const uint32_t ctl = dscm_cp15_control();
+  uint32_t cpsr, cur, i;
+  int ok;
+  if (g_armed || g_dispoff.state != 1)
+    return 0;
+  cpsr = dscm_irq_off();
+  cur = *vec;
+  ok = (ctl & (1u << 13)) && (ctl & (1u << 16)) && cur != WRAPPER
+       && (cur - 0x01000000u < 0x01000000u || cur - 0x02000000u < 0x01000000u)
+       && (dispatcher_known(cur), (g_disp.variant & (DISP_V1 | DISP_V2)) != 0)
+       && CODE16(g_dispoff.mode) != 3
+       && !(REG_IE & 4) && !(DISPSTAT & 0x20) && !(DISPSTAT & 0x80)
+       && (REG_IE & 1) && (DISPSTAT & 0x08) && !((REG_IE & 2) && (DISPSTAT & 0x10))
+       && (DISPCNT & MODE_MASK) == MODE_1;
+  if (!ok) {
+    dscm_irq_restore(cpsr);
+    return 0;
+  }
+  for (i = 64; i < 256; i += 4)
+    LW(i) = 0;
+  LW(LW_T2ADDR) = g_disp.table + 2 * 4;
+  LW(LW_T2VAL) = CODE32(g_disp.table + 2 * 4);
+  LW(LW_STAGE) = line_stage();
+  LW(LW_OWN) = 1;
+  LW(LW_NEXPIRE) = LINE_EXPIRE;
+  LW(LW_LYC) = LW(LW_LYC2) = LINE_LYC0;
+  DISPSTAT = (uint16_t)((DISPSTAT & 0x00FF) | LINE_LYC0 << 8);
+  REG_IF = 4;
+  DISPSTAT = (uint16_t)(DISPSTAT | 0x20);
+  REG_IE |= 4;
+  dscm_wrap_orig = cur;
+  LW(LW_STATE) = 1;
+  dscm_dc_clean((const void*)dscm_wrap_words, 256);
+  *vec = WRAPPER;
+  dscm_irq_restore(cpsr);
+  for (i = 0; i < LC_COUNT; i++)
+    g_line_seen[i] = 0;
+  g_line = 1;
+  g_line_used = 1;
+  dscm_popup_watch = 1;
+  return 1;
+}
+
+/* The line path off, IRQs masked: the vector back if it's still ours, the
+ * VCOUNT IRQ given back as we found it (unless the game took it), a band
+ * still up taken down. */
+static void line_uninstall(int give_back)
+{
+  volatile uint32_t* vec = irq_vector();
+  const uint32_t cpsr = dscm_irq_off();
+  if (*vec == WRAPPER)
+    *vec = dscm_wrap_orig;
+  if (give_back && LW(LW_OWN) && CODE32(LW(LW_T2ADDR)) == LW(LW_T2VAL)) {
+    REG_IE &= ~4u;
+    DISPSTAT = (uint16_t)(DISPSTAT & ~0x20);
+    REG_IF = 4;
+  }
+  if ((NDMA_CNT(CH_FIFO) & NDMA_ON) && NDMA_DAD(CH_FIFO) == MMEM_FIFO)
+    NDMA_CNT(CH_FIFO) = 0;
+  if (LW(LW_UP) && (DISPCNT & MODE_MASK) == MODE_3)
+    DISPCNT_MODE = (uint8_t)(DISPCNT_MODE & ~2);
+  LW(LW_UP) = 0;
+  LW(LW_STATE) = 0;
+  dscm_dc_clean((const void*)dscm_wrap_words, 256);
+  dscm_irq_restore(cpsr);
+  g_line = 0;
+}
+
+/* This frame's band for the wrapper to latch at the next VBlank (none: 0),
+ * with its expiry: without the idle pass refreshing it, the band stops after
+ * LINE_EXPIRE frames. */
+static void line_publish(int rows)
+{
+  const uint32_t cpsr = dscm_irq_off();
+  LW(LW_STAGE) = line_stage();
+  if (rows > 0) {
+    LW(LW_NFIRST) = (uint32_t)(192 - rows);
+    LW(LW_NSRC) = g_src + (uint32_t)(g_rows - rows) * 512;
+    LW(LW_NWORDS) = (uint32_t)(rows + MARGIN) * 128;
+    LW(LW_NSCREEN) = POWCNT1 & POWCNT1_TOP;
+  } else {
+    LW(LW_NFIRST) = 0;
+  }
+  LW(LW_NEXPIRE) = LW(LW_LATCHED) + LINE_EXPIRE;
+  dscm_dc_clean((const void*)dscm_wrap_words, 256);
+  dscm_irq_restore(cpsr);
+}
+
+/* No band of ours latched or up: the band's pixels may be redrawn. */
+static int line_down(void)
+{
+  return !g_line || (!LW(LW_NFIRST) && !LW(LW_FIRST) && !LW(LW_UP));
+}
+
+/* The counters since the last tick into the statistics; returns the frames a
+ * band was up (whole or cut; in the watch stage, our VCOUNT IRQs). */
+static uint32_t line_collect(uint32_t* cut)
+{
+  uint32_t d[LC_COUNT], i;
+  for (i = 0; i < LC_COUNT; i++) {
+    const uint32_t v = LW(LC_VC + i * 4);
+    d[i] = v - g_line_seen[i];
+    g_line_seen[i] = v;
+  }
+  g_stats.line_vc += d[0];
+  g_stats.arms += d[1];
+  g_stats.frames_shown += d[2];
+  g_stats.frames_cut += d[3];
+  g_stats.line_late += d[4];
+  g_stats.line_skip += d[5];
+  g_stats.line_leak += d[6];
+  g_stats.line_mode0 += d[7];
+  g_stats.line_reassert += d[8];
+  g_stats.line_ended += d[9];
+  g_stats.line_latency = (uint16_t)(LW(LC_LATENCY) < 0xFFFF ? LW(LC_LATENCY) : 0xFFFF);
+  g_stats.line_spin = (uint16_t)(LW(LC_SPIN) < 0xFFFF ? LW(LC_SPIN) : 0xFFFF);
+  g_stats.line_skipwhy = (uint8_t)LW(LC_SKIPWHY);
+  g_stats.line_standdown = (uint8_t)LW(LC_STANDDOWN);
+  *cut = d[3];
+  return LW(LW_STAGE) == 0 ? d[0] : d[2] + d[3];
+}
+
+/* The wrapper still on the vector? A soft reset (nds-bootstrap clears it)
+ * or the game took it: the line path is gone; a band of ours still up is
+ * taken down here. Also: our VCOUNT IRQ left to the game (stood down). */
+static void line_check(void)
+{
+  uint32_t cpsr;
+  if (!g_line)
+    return;
+  cpsr = dscm_irq_off();
+  if (*irq_vector() != WRAPPER) {
+    if ((NDMA_CNT(CH_FIFO) & NDMA_ON) && NDMA_DAD(CH_FIFO) == MMEM_FIFO)
+      NDMA_CNT(CH_FIFO) = 0;
+    if ((DISPCNT & MODE_MASK) == MODE_3)
+      DISPCNT_MODE = (uint8_t)(DISPCNT_MODE & ~2);
+    LW(LW_UP) = 0;
+    LW(LW_STATE) = 0;
+    dscm_dc_clean((const void*)dscm_wrap_words, 256);
+    dscm_irq_restore(cpsr);
+    g_line = 0;
+    if (++g_stats.vector_lost >= VECTOR_LOST_MAX)
+      g_standdown = DSS_POPUP_WHY_VECTOR;
+    return;
+  }
+  dscm_irq_restore(cpsr);
+  if (!LW(LW_OWN)) {
+    line_uninstall(0);                         /* the VCOUNT IRQ is the game's now: ours left as they are */
+    g_line_off = 1;
+  }
+}
+
 /* ---- the pop-up's life, a frame at a time ---- */
 
 static void next_popup(void)
@@ -1061,11 +1343,14 @@ static void next_popup(void)
   g_rendered = 0;
 }
 
+static void tick_life(uint32_t passed, uint32_t shown);
+
 /* Once per new frame: what the band did since the last tick moves the pop-up on. */
 static void tick(uint32_t frame)
 {
   const uint32_t passed = frame - g_frame;
   const uint16_t screen = POWCNT1 & POWCNT1_TOP;
+  uint32_t shown;
   int showed;
   g_frame = frame;
   g_skips_seen = 0;
@@ -1080,9 +1365,19 @@ static void tick(uint32_t frame)
   g_stats.screen = screen ? 1 : 0;
   g_stats.mode = g_mode;
 
-  showed = g_stats.frames_shown != g_shown_seen || g_stats.frames_cut != g_cut_seen;
-  if (g_stats.frames_cut != g_cut_seen)
-    g_cur.st.frames_cut++;
+  if (g_line) {
+    /* the line path: the frames a band was up since the last tick (in a
+     * 30 fps scene, two a tick) */
+    uint32_t cut;
+    shown = line_collect(&cut);
+    if (cut)
+      g_cur.st.frames_cut = (uint16_t)(g_cur.st.frames_cut + cut);
+  } else {
+    shown = g_stats.frames_shown != g_shown_seen || g_stats.frames_cut != g_cut_seen;
+    if (g_stats.frames_cut != g_cut_seen)
+      g_cur.st.frames_cut++;
+  }
+  showed = shown != 0;
   g_shown_seen = g_stats.frames_shown;
   g_cut_seen = g_stats.frames_cut;
   if (g_wakes) {
@@ -1101,6 +1396,26 @@ static void tick(uint32_t frame)
     g_wakes = 0;
   }
 
+  tick_life(passed, shown);
+
+  /* the line path: this frame's band published, or the path taken down
+   * once no pop-up wants it and no band of ours is latched or up */
+  if (g_line) {
+    if (!line_wanted() || (g_cur.phase == P_FREE && !g_queue_count)) {
+      line_publish(0);
+      if (line_down())
+        line_uninstall(1);
+    } else {
+      line_publish(g_cur.phase >= P_IN && g_rendered && g_screen_frames >= SCREEN_STABLE ? visible_rows() : 0);
+    }
+  }
+}
+
+/* The pop-up's life for a tick: passed frames since the last, shown of them
+ * with the band up. */
+static void tick_life(uint32_t passed, uint32_t shown)
+{
+  uint32_t n;
   if (g_mode == DSS_DISPLAY_OFF || g_standdown) {
     /* everything waiting is refused, one a frame (the ARM7's send ring is small) */
     if (g_cur.phase != P_FREE)
@@ -1122,17 +1437,19 @@ static void tick(uint32_t frame)
       g_cur.st.frames_waited++;
       return;
     }
-    if (g_armed)
-      return;                                  /* the last pop-up's band is still armed */
+    if (g_armed || !line_down())
+      return;                                  /* the last pop-up's band is still armed or latched */
     render();
     choose_source();
     g_cur.phase = P_IN;
     g_cur.step = 0;
     g_cur.waited_run = 0;
+    if (line_wanted() && !g_line)
+      line_install();                          /* else the idle-armed path for this pop-up */
     return;
   }
 
-  if (!showed) {
+  if (!shown) {
     g_cur.st.frames_waited = (uint16_t)(g_cur.st.frames_waited + (passed < 0xFFFF ? passed : 1));
     g_cur.waited_run = (uint16_t)(g_cur.waited_run + (passed < 0xFFFF ? passed : 1));
     if (g_cur.waited_run >= WAIT_MAX)
@@ -1140,22 +1457,24 @@ static void tick(uint32_t frame)
     return;
   }
   g_cur.waited_run = 0;
-  if (g_cur.st.frames_shown < 0xFFFF)
-    g_cur.st.frames_shown++;
+  g_cur.st.frames_shown = (uint16_t)(g_cur.st.frames_shown + shown < 0xFFFF ? g_cur.st.frames_shown + shown : 0xFFFF);
   if (g_cur.st.state == DSS_POPUP_QUEUED)
     set_state(&g_cur, DSS_POPUP_SHOWN, DSS_POPUP_WHY_NONE);
-  g_cur.step++;
-  switch (g_cur.phase) {
-    case P_IN:
-      if (g_cur.step >= SLIDE) { g_cur.phase = P_HOLD; g_cur.step = 0; }
-      break;
-    case P_HOLD:
-      if (g_cur.step >= g_cur.hold) { g_cur.phase = P_OUT; g_cur.step = 0; }
-      break;
-    case P_OUT:
-      if (g_cur.step >= SLIDE - 1)
-        finish(&g_cur, DSS_POPUP_DONE, DSS_POPUP_WHY_NONE);
-      break;
+  /* a step a frame shown (the line path may have shown two since the last tick) */
+  for (n = shown < 64 ? shown : 64; n && g_cur.phase != P_FREE; n--) {
+    g_cur.step++;
+    switch (g_cur.phase) {
+      case P_IN:
+        if (g_cur.step >= SLIDE) { g_cur.phase = P_HOLD; g_cur.step = 0; }
+        break;
+      case P_HOLD:
+        if (g_cur.step >= g_cur.hold) { g_cur.phase = P_OUT; g_cur.step = 0; }
+        break;
+      case P_OUT:
+        if (g_cur.step >= SLIDE - 1)
+          finish(&g_cur, DSS_POPUP_DONE, DSS_POPUP_WHY_NONE);
+        break;
+    }
   }
 }
 
@@ -1200,7 +1519,7 @@ void dscm_popup_set_mode(uint8_t mode)
 
 static void update_active(void)
 {
-  dscm_popup_active = (uint8_t)(g_cur.phase != P_FREE || g_queue_count || g_armed);
+  dscm_popup_active = (uint8_t)(g_cur.phase != P_FREE || g_queue_count || g_armed || g_line);
   if (!dscm_popup_active)
     g_wakes = 0;                               /* the next tick may be minutes on */
 }
@@ -1221,15 +1540,25 @@ static void note_wake(void)
     g_wakes |= W_LATE;
 }
 
-/* Each idle pass while a pop-up is waiting, up or armed (dscm_popup_active),
- * from module_idle with the lock held: the last arming's result, the pop-up's
- * frame tick when a VBlank came, then the band for this frame. */
+/* Each idle pass while a pop-up is waiting, up or armed, or the line path is
+ * installed (dscm_popup_active), and while dscm_popup_watch asks (the
+ * GX_DispOff scan, the leak watch), from module_idle with the lock held: the
+ * last arming's result, the pop-up's frame tick when a VBlank came, then the
+ * band for this frame (the idle-armed path). */
 void dscm_popup_idle(uint32_t frame)
 {
+  dispoff_scan();
+  leak_watch();
+  if (!dscm_popup_active) {
+    if (g_dispoff.state && !g_line_used)
+      dscm_popup_watch = 0;                    /* nothing to watch until a pop-up comes */
+    return;
+  }
+  line_check();
   collect();
   if (frame != g_frame)
     tick(frame);
-  if (g_cur.phase >= P_IN && g_rendered) {
+  if (!g_line && g_cur.phase >= P_IN && g_rendered) {
     note_wake();
     arm();
   }
@@ -1237,13 +1566,30 @@ void dscm_popup_idle(uint32_t frame)
 }
 
 /* After the idle pass's own work (network, stream): arm again if an IRQ
- * ended the band meanwhile and there is still time in the frame. */
+ * ended the band meanwhile and there is still time in the frame (the
+ * idle-armed path only). */
 void dscm_popup_rearm(void)
 {
   collect();
-  if (g_cur.phase >= P_IN && g_rendered)
+  if (!g_line && g_cur.phase >= P_IN && g_rendered)
     arm();
   update_active();
+}
+
+/* nds-bootstrap's reset (module.c, H.reset_pending): the game starts over,
+ * with the vector, IE and the NDMA channels cleared by the reset. Our state
+ * goes, no register is touched. */
+void dscm_popup_reset(void)
+{
+  LW(LW_STATE) = 0;
+  LW(LW_UP) = 0;
+  dscm_dc_clean((const void*)dscm_wrap_words, 256);
+  g_line = 0;
+  g_armed = 0;
+  g_cur.phase = P_FREE;
+  g_queue_count = 0;
+  g_rendered = 0;
+  dscm_popup_active = 0;
 }
 
 void dscm_popup_status(dss_display_status_t* out)
@@ -1253,5 +1599,8 @@ void dscm_popup_status(dss_display_status_t* out)
   g_stats.irq_woke = dscm_wrap_woke;
   g_stats.pass_on = (uint8_t)(pass_allowed() && (g_disp.variant & (DISP_SDK3 | DISP_SDK2)));
   g_stats.dispatcher = g_disp.variant;
+  g_stats.line = (uint8_t)(g_line ? 1 : g_line_off ? 2 : 0);
+  g_stats.line_stage = (uint8_t)line_stage();
+  g_stats.dispoff = g_dispoff.state;
   *out = g_stats;
 }
