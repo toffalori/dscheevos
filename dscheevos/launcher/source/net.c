@@ -115,7 +115,9 @@ int net_connect(int timeout_frames, void (*each_frame)(void))
     }
     if (each_frame)
       each_frame();
-    swiWaitForVBlank();
+    /* not swiWaitForVBlank(): it halts every thread, and DSWiFi's lwIP thread
+     * has to run for DHCP (the first attempt timed out) */
+    cothread_yield_irq(IRQ_VBLANK);
   }
   g_error = "No saved access point answered";
   return -1;
