@@ -972,27 +972,7 @@ line_vblank:
 	ldrne	r1, [r3, #C_BUSYE]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_BUSYE]
-	ldr	r0, [r3, #L_STAGE]
-	cmp	r0, #2
-	bne	6f                          @ dry: mode 1, the FIFO isn't drained, nothing to measure
-	add	r2, r12, #0x4100
-	ldr	r0, [r2, #0x3C]             @ NDMA2SAD: how far our feed got, should the register count up
-	ldr	r1, [r3, #L_SRC]
-	sub	r0, r0, r1
-	asr	r0, r0, #2                  @ words moved
-	ldr	r1, [r3, #L_FIRST]
-	rsb	r1, r1, #192                @ the band's rows
-	sub	r0, r0, r1, lsl #7          @ minus rows x 128
-	ldr	r1, [r3, #C_XMIN]
-	cmp	r0, r1
-	strlt	r0, [r3, #C_XMIN]
-	ldr	r1, [r3, #C_XMAX]
-	cmp	r0, r1
-	strgt	r0, [r3, #C_XMAX]
-	ldr	r1, [r3, #C_XN]
-	add	r1, r1, #1
-	str	r1, [r3, #C_XN]
-6:	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
+	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
 	and	r1, r1, #3
 	ldr	r0, [r3, #L_STAGE]
 	cmp	r0, #2
@@ -1011,6 +991,29 @@ line_vblank:
 1:	ldr	r2, [r3, #C_WHOLE]
 	add	r2, r2, #1
 	str	r2, [r3, #C_WHOLE]
+	cmp	r0, #3                      @ telemetry, whole bands of the on stage only (dry: the FIFO
+	bne	3f                          @ isn't drained; a cut band stops draining it early)
+	add	r2, r12, #0x4100
+	ldr	r1, [r2, #0x40]             @ NDMA2DAD: still ours (feeds DISP_MMEM_FIFO)?
+	sub	r1, r1, #0x04000000
+	cmp	r1, #0x68
+	bne	3f
+	ldr	r0, [r2, #0x3C]             @ NDMA2SAD: how far our feed got, should the register count up
+	ldr	r1, [r3, #L_SRC]
+	sub	r0, r0, r1
+	asr	r0, r0, #2                  @ words moved
+	ldr	r1, [r3, #L_FIRST]
+	rsb	r1, r1, #192                @ the band's rows
+	sub	r0, r0, r1, lsl #7          @ minus rows x 128
+	ldr	r1, [r3, #C_XMIN]
+	cmp	r0, r1
+	strlt	r0, [r3, #C_XMIN]
+	ldr	r1, [r3, #C_XMAX]
+	cmp	r0, r1
+	strgt	r0, [r3, #C_XMAX]
+	ldr	r1, [r3, #C_XN]
+	add	r1, r1, #1
+	str	r1, [r3, #C_XN]
 3:	bl	band_down
 2:	ldr	r1, [r3, #L_NFIRST]         @ the next frame's band, latched
 	str	r1, [r3, #L_FIRST]

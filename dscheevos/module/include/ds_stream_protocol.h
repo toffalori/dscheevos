@@ -311,9 +311,10 @@ typedef struct __attribute__((packed)) {
                               (bit 6 never: NDMA2 is ours), 8-11 DMA0-3 feeding the geometry FIFO */
   uint32_t feed_busy_start;/* bands that started with another channel busy */
   uint32_t feed_busy_end;  /* bands that reached the VBlank with another channel busy */
-  uint32_t feed_xfer_n;    /* bands measured at the VBlank (stage on only) */
+  uint32_t feed_xfer_n;    /* bands measured at the VBlank (whole bands of the stage on only) */
   int32_t  feed_xfer_min;  /* words the feed had moved by the VBlank, minus the band's rows x 128: the least */
-  int32_t  feed_xfer_max;  /* and the most (if NDMA2SAD doesn't count up, both read -rows x 128) */
+  int32_t  feed_xfer_max;  /* and the most: below 0 means NDMA2SAD doesn't count up (no measurement); 0 or
+                              more means it does, and a min well below the max means underruns */
   uint32_t feed_gcnt;      /* NDMAGCNT when the line path went up: bit 31 round robin, 16-19 its CPU cycles */
 } dss_display_status_t;    /* 164; the skips count frames, once per reason */
 
