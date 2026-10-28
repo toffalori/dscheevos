@@ -160,7 +160,7 @@ static void setup_game(void) {
 
 /* ---------------------------------------------------------------- raw IRQ phase */
 
-enum { T_NONE, T_H1, T_H2A, T_H2B, T_NEW, T_STRESS_NDMA, T_STRESS_DMA3, T_BOTTOM, T_T1, T_COUNTER, T_D1 };
+enum { T_NONE, T_H1, T_H2A, T_H2B, T_NEW, T_STRESS_NDMA, T_STRESS_DMA3, T_BOTTOM, T_T1, T_COUNTER, T_D1, T_P };
 static volatile int test;
 static volatile u32 frame;
 
@@ -264,7 +264,14 @@ static void strip_exit_or_guard(void) {
 
 static VoidFn saved_handler;
 static u32 saved_ie;
-#define RAW_BITS (IRQ_VBLANK | IRQ_NDMA(2) | IRQ_NDMA(3) | IRQ_VCOUNT)
+#define RAW_BITS (IRQ_VBLANK | IRQ_NDMA(2) | IRQ_NDMA(3) | IRQ_VCOUNT | IRQ_TIMER2)
+
+/* P1 (the production setup, dsi-popup-plan.md and its two reviews): the
+ * "game" IRQ handler's view. It must never run with mode 3 on, and its own
+ * DISPCNT writes (bit 22, invisible here: no bitmap sprites) must stick. */
+static volatile u32 p_irqs, p_saw3, p_lost, p_bad_vblank, p_frames;
+static volatile u32 p_written = 2;          /* the bit-22 value the game wrote this frame; 2: none */
+static volatile u32 p_marker;
 
 /* D1 (round2-synthesis.md): the all-NDMA strip. While the "game" waits,
  * up to three channels are armed and then nothing of ours runs. Channels
@@ -400,6 +407,17 @@ __attribute__((target("arm"), noinline)) static void raw_isr(void) {
 			}
 		}
 	}
+	if (f & IRQ_TIMER2) {                    /* P1: the game's own IRQ, landing anywhere */
+		REG_IF = IRQ_TIMER2;
+		TIMER2_CR = 0;
+		if (test == T_P) {
+			p_irqs++;
+			if (mode_get() == 3) p_saw3++;
+			p_marker ^= 1;
+			DISPCNT_A = (DISPCNT_A & ~BIT(22)) | (p_marker << 22);
+			p_written = p_marker;
+		}
+	}
 	if (f & IRQ_VCOUNT) {                    /* D1: a "game" IRQ in the strip: abort first */
 		REG_IF = IRQ_VCOUNT;
 		if (test == T_D1 && d1_armed) { d1_abort(); d1_aborts++; }
@@ -410,6 +428,12 @@ __attribute__((target("arm"), noinline)) static void raw_isr(void) {
 			if (mode_get() == 3) { d1_bad_vblank++; mode_set(1); }
 			d1_armed = 0;
 			d1_frames++;
+		}
+		if (test == T_P) {
+			if (mode_get() == 3) { p_bad_vblank++; mode_set(1); }
+			if (p_written != 2 && ((DISPCNT_A >> 22) & 1) != p_written) p_lost++;
+			p_written = 2;
+			p_frames++;
 		}
 		frame++;
 		scroll++;
@@ -826,6 +850,162 @@ static void test_d1(void) {
 	if (nw) d1_run("D1n all-NDMA strip, FIFO from NWRAM (10 s)", nw, 0, 600, 0);
 }
 
+/* ---- P1: the production setup ----
+ * As the module would run it in a game booted by nds-bootstrap's NTR path:
+ *  - SCFG_EXT9 and MBK2-8 as that boot leaves them (main.arm9.c:576-583,
+ *    initMBKARM9), SCFG then locked;
+ *  - strip and DISPCNT table in NWRAM at 0x03760000, no starter channel (D1c);
+ *  - the abort in a wrapper put on the BIOS IRQ vector (DTCM+0x3FFC) at
+ *    arming, which puts the original back on its first entry, stops only our
+ *    own channels (recognised by destination), with a bounded wait;
+ *  - arming skipped when an IRQ is pending, or undone when a line passed.
+ * A "game" timer IRQ lands at swept points across the strip's lines and their
+ * H-Blank edges on 3 frames of 4. Runs last: the lock stays until power-off. */
+#define P_NW  0x03760000u
+#define P_TAB (P_NW + 256u * (N + M) * 2u)  /* the table right after the banner */
+static VoidFn p_orig;
+static volatile u32 p_aborts, p_armed, p_skipped_pending, p_undone;
+
+static inline bool p_ours(void) {
+	return ((NDMA_CNT(D1_A) & NDMA_ON) && NDMA_DAD(D1_A) == 0x04000000u)
+	    || ((NDMA_CNT(D1_F) & NDMA_ON) && NDMA_DAD(D1_F) == MMEM_FIFO);
+}
+
+static inline void p_stop(void) {
+	NDMA_CNT(D1_A) = 0;                      /* the DISPCNT writer first */
+	NDMA_CNT(D1_F) = 0;
+	for (int i = 0; i < 64 && (NDMA_CNT(D1_A) & NDMA_ON); i++) {}
+	if (mode_get() == 3) mode_set(1);
+}
+
+__attribute__((target("arm"), noinline)) static void p_wrapper(void) {
+	IRQ_HANDLER = p_orig;                    /* off the vector again before anything else */
+	if (p_ours()) {
+		p_stop();
+		p_aborts++;
+	}
+	p_orig();
+}
+
+static void p_arm(int fire) {
+	const int ime = REG_IME;
+	REG_IME = 0;
+	if (REG_IE & REG_IF) {                   /* an IRQ is due: it would cut the strip at once */
+		p_skipped_pending++;
+		REG_IME = ime;
+		return;
+	}
+	const u32 vc = REG_VCOUNT;
+	const u32 d = (DISPCNT_A & ~0x30000u) | 0x10000u;
+	const u32 n = 191 - vc;
+	u32* tab = (u32*)P_TAB;
+	for (u32 i = 0; i < n; i++) {
+		const u32 line = vc + i + 1;
+		tab[i] = (line >= D1_E && line <= 190) ? (d | 0x30000u) : d;
+	}
+	DC_FlushRange(tab, n * 4);
+	NDMA_CNT(D1_F) = 0;
+	NDMA_SAD(D1_F) = P_NW;
+	NDMA_DAD(D1_F) = MMEM_FIFO;
+	NDMA_TCNT(D1_F) = (N + M) * 128;
+	NDMA_WCNT(D1_F) = 4;
+	NDMA_BCNT(D1_F) = 0;
+	NDMA_CNT(D1_A) = 0;
+	NDMA_SAD(D1_A) = (u32)tab;
+	NDMA_DAD(D1_A) = 0x04000000;
+	NDMA_TCNT(D1_A) = n;
+	NDMA_WCNT(D1_A) = 1;
+	NDMA_BCNT(D1_A) = 0;
+	NDMA_CNT(D1_A) = NDMA_ON | NDMA_START(0x07) | NDMA_DFIX | NDMA_PHYS(0);
+	NDMA_CNT(D1_F) = d1_fifo_cnt();
+	if (REG_VCOUNT != vc) {                  /* a line went by: the table is off by one */
+		p_stop();
+		p_undone++;
+		REG_IME = ime;
+		return;
+	}
+	p_orig = IRQ_HANDLER;
+	IRQ_HANDLER = p_wrapper;
+	if (fire) {
+		/* from line E-1 to the start of VBlank, in 397-cycle steps, so the IRQ
+		 * meets every point of a line (2130 cycles) over the run */
+		const u32 span = (191 - D1_E + 2) * 2130;
+		const u32 cycles = (D1_E - 1 - vc) * 2130 + (p_frames * 397) % span;
+		TIMER2_CR = 0;
+		TIMER2_DATA = (u16)(65536 - (cycles >> 6));
+		TIMER2_CR = TIMER_ENABLE | TIMER_IRQ_REQ | TIMER_DIV_64;
+	}
+	p_armed++;
+	REG_IME = ime;
+}
+
+static void p_run(const char* name, int fire_every4, int frames) {
+	title(name);
+	say("%s look: banner on lines %d-190, game above", name, D1_E);
+	p_irqs = p_saw3 = p_lost = p_bad_vblank = p_frames = 0;
+	p_aborts = p_armed = p_skipped_pending = p_undone = 0;
+	p_written = 2;
+	raw_begin(T_P);
+	{ const u32 f0 = frame; while (frame == f0) {} }
+	for (int i = 0; i < frames; i++) {
+		while (REG_VCOUNT != D1_ARM) {}
+		p_arm(fire_every4 && (frame % 4) != 0);
+		const u32 f1 = frame;
+		while (frame == f1) asm volatile("" ::: "memory");
+	}
+	TIMER2_CR = 0;
+	raw_end();
+	say("%s frames=%lu armed=%lu skipped(pending)=%lu undone=%lu game-irqs=%lu aborts=%lu",
+	    name, p_frames, p_armed, p_skipped_pending, p_undone, p_irqs, p_aborts);
+	say("%s game saw mode 3=%lu lost DISPCNT writes=%lu mode 3 at VBlank=%lu (pass: all 0)",
+	    name, p_saw3, p_lost, p_bad_vblank);
+}
+
+static void test_p(void) {
+	title("P1 production setup (about 30 s)");
+	say("P1 before: SCFG_EXT9=%08lx MBK1-5 %08lx %08lx %08lx %08lx %08lx MBK6-8 %08lx %08lx %08lx", SCFG_EXT9,
+	    REG32(0x04004040), REG32(0x04004044), REG32(0x04004048), REG32(0x0400404C), REG32(0x04004050),
+	    REG32(0x04004054), REG32(0x04004058), REG32(0x0400405C));
+	if (!(SCFG_EXT9 & BIT(31))) {
+		say("P1 SCFG already locked (run P1 right after power-on): skipped");
+		return;
+	}
+	/* nds-bootstrap's NTR game boot: initMBKARM9, every B/C slot to the ARM9, then SCFG */
+	REG32(0x04004044) = 0x9094989C;
+	REG32(0x04004048) = 0x8084888C;
+	REG32(0x0400404C) = 0x9094989C;
+	REG32(0x04004050) = 0x8084888C;
+	REG32(0x04004054) = 0x00000000;
+	REG32(0x04004058) = 0x07C03740;
+	REG32(0x0400405C) = 0x07403700;
+	SCFG_EXT9 = 0x8300C000u | BIT(16);
+	SCFG_EXT9 &= ~BIT(31);
+	say("P1 after lock: SCFG_EXT9=%08lx MBK1-5 %08lx %08lx %08lx %08lx %08lx MBK6-8 %08lx %08lx %08lx", SCFG_EXT9,
+	    REG32(0x04004040), REG32(0x04004044), REG32(0x04004048), REG32(0x0400404C), REG32(0x04004050),
+	    REG32(0x04004054), REG32(0x04004058), REG32(0x0400405C));
+	/* separate memory at each address the module would use, or aliases? */
+	vu32* const w0 = (vu32*)0x03700000;
+	vu32* const w1 = (vu32*)0x03740000;
+	vu32* const w2 = (vu32*)0x03748000;
+	vu32* const w3 = (vu32*)P_NW;
+	*w0 = 0x11111111; *w1 = 0x22222222; *w2 = 0x33333333; *w3 = 0x44444444;
+	DC_FlushAll();
+	DC_InvalidateAll();
+	say("P1 alias 03700000=%08lx 03740000=%08lx 03748000=%08lx 03760000=%08lx (pass: 1..., 2..., 3..., 4...)",
+	    *w0, *w1, *w2, *w3);
+	u16* const dst = (u16*)P_NW;
+	for (u32 i = 0; i < 256 * (N + M); i++) dst[i] = banner[i];
+	DC_FlushRange(dst, 256 * (N + M) * 2);
+	if (dst[1000] != banner[1000]) {
+		say("P1 NWRAM at %08lx not writable: skipped", P_NW);
+		return;
+	}
+	flush_log();
+	p_run("P1a strip only, no game IRQ (10 s)", 0, 600);
+	flush_log();
+	p_run("P1b game IRQs swept across the strip (20 s)", 1, 1200);
+}
+
 static void hold(int frames);
 
 /* ---- C1: D-cache clean by address (rnd's ARM7-route question) ---- */
@@ -1053,11 +1233,18 @@ int main(void) {
 
 	setup_game();
 	make_banner();
-	iprintf("\nStart filming both screens.\nPress A to run (about 6 min).\n");
+	iprintf("\nStart filming both screens.\nA: all tests (about 13 min)\nX: production test P1 only\n   (about 40 s)\n");
 	for (;;) {
 		swiWaitForVBlank();
 		scanKeys();
 		if (keysDown() & KEY_A) break;
+		if (keysDown() & KEY_X) {
+			test_p();
+			consoleClear();
+			say("DONE, log %s", sd_ok ? "written to sd:/dscheevos-lab/log.txt" : "NOT written (no SD)");
+			flush_log();
+			for (;;) swiWaitForVBlank();
+		}
 	}
 
 	test_h1();      flush_log();
@@ -1083,6 +1270,8 @@ int main(void) {
 		if (keysDown() & KEY_A) { test_t1(); flush_log(); break; }
 		if (keysDown() & KEY_B) break;
 	}
+	test_p();       /* last: it locks SCFG until power-off */
+	flush_log();
 
 	consoleClear();
 	say("DONE, log %s", sd_ok ? "written to sd:/dscheevos-lab/log.txt" : "NOT written (no SD)");
