@@ -11,9 +11,10 @@ TLS_SRC := $(wildcard $(MBEDTLS)/library/*.c)
 TLS_OBJ := $(patsubst $(MBEDTLS)/library/%.c,$(BUILD)/tls/%.o,$(TLS_SRC))
 
 .PHONY: test clean
-test: $(BUILD)/test_wpa $(BUILD)/test_heap
+test: $(BUILD)/test_wpa $(BUILD)/test_heap $(BUILD)/test_popup
 	$(BUILD)/test_wpa
 	$(BUILD)/test_heap
+	$(BUILD)/test_popup $(FONTS) $(BUILD)/popup
 
 $(BUILD)/tls/%.o: $(MBEDTLS)/library/%.c $(TLSCONF)/dsc_mbedtls_config.h
 	@mkdir -p $(dir $@)
@@ -58,5 +59,14 @@ $(BUILD)/heap/heap.o: ../src/heap.c ../src/heap.h ../include/dscheevos_module.h
 $(BUILD)/test_heap: test_heap.c $(BUILD)/heap/heap.o $(BUILD)/heap/dscheevos.o $(RC_OBJ)
 	$(CC) $(CFLAGS) $(HEAP_INC) test_heap.c $(BUILD)/heap/heap.o $(BUILD)/heap/dscheevos.o $(RC_OBJ) -lm -o $@
 
+
+# test_popup: the streamer's pop-ups (src/popup.c) with the registers in plain memory;
+# writes the bands it draws as PPM images into build/popup.
+FONTS    ?= ../../../external/nds-bootstrap/retail/nitrofiles/fonts
+DISPLAY  := ../../display
+$(BUILD)/test_popup: test_popup.c ../src/popup.c ../include/ds_stream_protocol.h $(DISPLAY)/src/dsd_render.c
+	@mkdir -p $(BUILD)/popup
+	$(CC) $(CFLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -DDSCM_STREAM -I../include -I$(DISPLAY)/include \
+	  test_popup.c $(DISPLAY)/src/dsd_render.c $(DISPLAY)/src/dsd_badge.c $(DISPLAY)/src/dsd_sched.c -o $@
 clean:
 	rm -rf $(BUILD)

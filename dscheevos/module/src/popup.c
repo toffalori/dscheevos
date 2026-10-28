@@ -48,9 +48,17 @@ extern uint32_t dscm_irq_off(void);
 extern void dscm_irq_restore(uint32_t cpsr);
 extern void dscm_dc_clean(const void* addr, uint32_t len);
 
-#define REG16(a) (*(volatile uint16_t*)(a))
-#define REG32(a) (*(volatile uint32_t*)(a))
+/* The host test (tests/popup) puts the registers and the IRQ vector in plain
+ * memory; on the console these are the addresses themselves. */
+#ifndef POPUP_IO
+#define POPUP_IO(a) (a)
+#endif
+#define REG8(a)  (*(volatile uint8_t*)POPUP_IO(a))
+#define REG16(a) (*(volatile uint16_t*)POPUP_IO(a))
+#define REG32(a) (*(volatile uint32_t*)POPUP_IO(a))
+#define WRAPPER  ((uint32_t)(uintptr_t)dscm_irq_wrapper)
 #define DISPCNT        REG32(0x04000000)
+#define DISPCNT_MODE   REG8(0x04000002)        /* DISPCNT bits 16-23: the display mode in bits 0-1 */
 #define DISPSTAT       REG16(0x04000004)
 #define VCOUNT         REG16(0x04000006)
 #define DISPCAPCNT     REG32(0x04000064)
@@ -519,12 +527,16 @@ static void stop_channels(void)
   if ((NDMA_CNT(CH_FIFO) & NDMA_ON) && NDMA_DAD(CH_FIFO) == MMEM_FIFO)
     NDMA_CNT(CH_FIFO) = 0;
   if ((DISPCNT & MODE_MASK) == MODE_3)
-    *(volatile uint8_t*)0x04000002 = (uint8_t)((*(volatile uint8_t*)0x04000002 & ~3) | 1);
+    DISPCNT_MODE = (uint8_t)((DISPCNT_MODE & ~3) | 1);
 }
 
 static volatile uint32_t* irq_vector(void)
 {
+#ifdef POPUP_HOST_VECTOR
+  return POPUP_HOST_VECTOR;
+#else
   return (volatile uint32_t*)(dscm_dtcm_base() + 0x3FFC);
+#endif
 }
 
 /* The result of the last arming, once the wrapper has run for it. */
@@ -536,7 +548,7 @@ static void collect(void)
   /* IRQs masked: the wrapper can't run between the two reads */
   cpsr = dscm_irq_off();
   if (dscm_wrap_hits == g_armed_hits) {
-    if (*irq_vector() == (uint32_t)dscm_irq_wrapper) {
+    if (*irq_vector() == WRAPPER) {
       dscm_irq_restore(cpsr);
       return;                                  /* no IRQ yet */
     }
@@ -630,7 +642,7 @@ static void arm(void)
   /* high vectors: the BIOS's IRQ entry reads [DTCM+0x3FFC] */
   vec = irq_vector();
   cur = *vec;
-  if (!(dscm_cp15_control() & (1u << 13)) || cur == (uint32_t)dscm_irq_wrapper
+  if (!(dscm_cp15_control() & (1u << 13)) || cur == WRAPPER
       || (cur - 0x01000000u >= 0x01000000u && cur - 0x02000000u >= 0x01000000u)) {
     g_stats.skip_vector++;
     goto out;
@@ -676,7 +688,7 @@ static void arm(void)
   g_armed_hits = dscm_wrap_hits;
   g_armed_first = (uint16_t)first;
   g_armed = 1;
-  *vec = (uint32_t)dscm_irq_wrapper;
+  *vec = WRAPPER;
   g_stats.arms++;
 out:
   dscm_irq_restore(cpsr);

@@ -260,6 +260,6 @@ typedef struct __attribute__((packed)) {
   uint32_t skip_irq;       /* no VBlank interrupt, or an H-Blank one */
   uint32_t skip_vector;    /* the IRQ vector or the high-vector bit */
   uint32_t skip_screen;    /* the main engine changed screens recently */
-} dss_display_status_t;    /* 64 */
+} dss_display_status_t;    /* 56 */
 
 #endif
