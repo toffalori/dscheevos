@@ -663,9 +663,22 @@ line_path:
 	ldr	r1, [r3, #L_UP]
 	cmp	r1, #0
 	bne	1f
-	ldrb	r1, [r12, #2]               @ mode 3 with no band of ours up: mode 1 back (bit 1 of byte 2)
+	ldrb	r1, [r12, #2]               @ mode 3 with no band of ours up: mode 1 back (bit 1 of byte 2),
 	tst	r1, #1
 	tstne	r1, #2
+	beq	1f
+	ldr	r0, [r12, #0xB8]            @ unless a legacy DMA feeds the FIFO (the game's own mode 3)
+	and	r0, r0, #0xB8000000
+	cmp	r0, #0xA0000000
+	ldrne	r0, [r12, #0xC4]
+	andne	r0, r0, #0xB8000000
+	cmpne	r0, #0xA0000000
+	ldrne	r0, [r12, #0xD0]
+	andne	r0, r0, #0xB8000000
+	cmpne	r0, #0xA0000000
+	ldrne	r0, [r12, #0xDC]
+	andne	r0, r0, #0xB8000000
+	cmpne	r0, #0xA0000000
 	beq	1f
 	bic	r1, r1, #2
 	strb	r1, [r12, #2]
@@ -683,7 +696,10 @@ line_path:
 	bne	2f
 	ldrh	r1, [r12, #6]
 	cmp	r1, #192                    @ in the VBlank lines, the VBlank IRQ still to come
-	blo	line_chain
+	bhs	2f
+	ldr	r2, [r3, #L_LYC]
+	cmp	r1, r2                      @ before LYC: a new frame came without a VBlank IRQ of ours
+	bhs	line_chain
 2:	bl	band_down
 	ldr	r1, [r3, #C_ENDED]
 	add	r1, r1, #1
@@ -717,14 +733,19 @@ line_vcount:
 	ldr	r1, [r3, #C_VC]
 	add	r1, r1, #1
 	str	r1, [r3, #C_VC]
+	ldr	r1, [r3, #L_UP]             @ our band still up from the last frame: its VBlank never
+	cmp	r1, #0                      @ reached us (the game masked it), so down with it first
+	blne	band_down
 	ldrh	r1, [r12, #6]
 	ldr	r2, [r3, #L_LYC]
 	sub	r1, r1, r2                  @ lines after LYC (a VCOUNT before it reads huge)
+	cmp	r1, #256
+	bhs	line_chain                  @ before LYC: a stale match (an old LYC), not counted
 	ldr	r2, [r3, #C_LATENCY]
 	cmp	r1, r2
 	strhi	r1, [r3, #C_LATENCY]
 	cmp	r1, #2
-	bhi	line_chain                  @ not at our line (a stale match): nothing this frame
+	bhi	line_chain                  @ too far past our line: nothing this frame
 	ldr	r1, [r3, #L_FIRST]
 	cmp	r1, #0
 	beq	line_chain                  @ no band this frame
@@ -829,7 +850,22 @@ line_vcount:
 	str	r1, [r2, #0x54]
 	b	line_late
 7:	ldrb	r1, [r12, #2]               @ the mode switch, byte 2 only
-	bic	r1, r1, #3
+	and	r0, r1, #3                  @ still mode 1 and no forced blank (a game thread may have run
+	cmp	r0, #1                      @ GX_DispOff since the guards): else nothing this frame
+	ldrbeq	r0, [r12]
+	tsteq	r0, #0x80
+	bne	9f
+	ldr	r0, [r12, #0x214]           @ IPC sync pending: nds-bootstrap's menu would run with it up
+	ldr	lr, [r12, #0x210]
+	and	r0, r0, lr
+	tst	r0, #0x10000
+	beq	8f
+9:	add	r2, r12, #0x4100            @ the feed off again, nothing drawn from it
+	mov	r1, #0
+	str	r1, [r2, #0x54]
+	mov	r0, #4
+	b	line_skip
+8:	bic	r1, r1, #3
 	ldr	r0, [r3, #L_STAGE]
 	cmp	r0, #2
 	orreq	r1, r1, #3                  @ on: main-memory display from the next line

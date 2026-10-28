@@ -66,6 +66,9 @@ extern void dscm_dc_invalidate(const void* addr, uint32_t len);
 #ifndef POPUP_CODE
 #define POPUP_CODE(a) (a)                      /* the game's code and data, read where they are */
 #endif
+#ifndef POPUP_LINE_ANY_SOURCE
+#define POPUP_LINE_ANY_SOURCE 0                /* the host test has no NWRAM to copy to */
+#endif
 #define REG8(a)  (*(volatile uint8_t*)POPUP_IO(a))
 #define REG16(a) (*(volatile uint16_t*)POPUP_IO(a))
 #define REG32(a) (*(volatile uint32_t*)POPUP_IO(a))
@@ -1150,23 +1153,48 @@ static uint32_t line_stage(void)
   return g_mode == DSS_DISPLAY_ON ? 2 : g_mode == DSS_DISPLAY_NOOP ? 1 : 0;
 }
 
-/* From the idle pass, once a line path has been up in this game: mode 3
- * with no band of ours up (a game RMW straddled our VBlank write, or
- * GX_DispOn wrote back a leaked mode) and sDispMode reading 3, put back to 1.
+/* A legacy DMA channel in main-memory display mode: the game feeds the FIFO
+ * itself, so a mode 3 is its own. */
+static int game_fifo_dma(void)
+{
+  int i;
+  for (i = 0; i < 4; i++)
+    if ((DMA_CNT(i) & 0xB8000000u) == 0xA0000000u)
+      return 1;
+  return 0;
+}
+
+/* From the idle pass, once a band of the line path has been on in this game:
+ * mode 3 with no band of ours up (a game RMW straddled our VBlank write, or
+ * GX_DispOn wrote back a leaked mode) and sDispMode reading 3, put back to 1;
+ * never while the game feeds the FIFO itself or an idle-armed band is out.
  * The wrapper does the first at every IRQ while installed. */
 static void leak_watch(void)
 {
   uint32_t cpsr;
-  if (!g_line_used)
+  if (!g_line_used || g_armed || game_fifo_dma())
     return;
   cpsr = dscm_irq_off();
+  if (g_line && LW(LW_UP) && VCOUNT < LW(LW_LYC)) {
+    /* a band of ours still marked up in a new frame: the VBlank IRQ didn't
+     * come (the game masked it), so nothing put mode 1 back */
+    if ((NDMA_CNT(CH_FIFO) & NDMA_ON) && NDMA_DAD(CH_FIFO) == MMEM_FIFO)
+      NDMA_CNT(CH_FIFO) = 0;
+    LW(LW_UP) = 0;
+    dscm_dc_clean((const void*)dscm_wrap_words, 256);
+  }
   if (!(g_line && LW(LW_UP)) && (DISPCNT & MODE_MASK) == MODE_3) {
     DISPCNT_MODE = (uint8_t)(DISPCNT_MODE & ~2);
     g_stats.line_leak++;
   }
-  if (g_dispoff.mode && CODE16(g_dispoff.mode) == 3) {
-    CODE16(g_dispoff.mode) = 1;
-    g_stats.dispmode_fixed++;
+  if (g_dispoff.mode) {
+    const uint16_t m = CODE16(g_dispoff.mode);
+    if (m == 3) {
+      CODE16(g_dispoff.mode) = 1;
+      g_stats.dispmode_fixed++;
+    } else if (m > 3) {
+      g_dispoff.mode = 0;                      /* not a display mode: not the variable we think */
+    }
   }
   dscm_irq_restore(cpsr);
 }
@@ -1189,7 +1217,9 @@ static int line_install(void)
   ok = (ctl & (1u << 13)) && (ctl & (1u << 16)) && cur != WRAPPER
        && (cur - 0x01000000u < 0x01000000u || cur - 0x02000000u < 0x01000000u)
        && (dispatcher_known(cur), (g_disp.variant & (DISP_V1 | DISP_V2)) != 0)
-       && CODE16(g_dispoff.mode) != 3
+       && (in_dtcm(g_disp.table, 22 * 4) || in_main_ram(g_disp.table)) && !(g_disp.table & 3)
+       && (g_src == NW_BASE || POPUP_LINE_ANY_SOURCE)   /* main RAM starves the feed while the game works */
+       && g_dispoff.mode && CODE16(g_dispoff.mode) != 3 && !game_fifo_dma()
        && !(REG_IE & 4) && !(DISPSTAT & 0x20) && !(DISPSTAT & 0x80)
        && (REG_IE & 1) && (DISPSTAT & 0x08) && !((REG_IE & 2) && (DISPSTAT & 0x10))
        && (DISPCNT & MODE_MASK) == MODE_1;
@@ -1217,21 +1247,20 @@ static int line_install(void)
   for (i = 0; i < LC_COUNT; i++)
     g_line_seen[i] = 0;
   g_line = 1;
-  g_line_used = 1;
   dscm_popup_watch = 1;
   return 1;
 }
 
 /* The line path off, IRQs masked: the vector back if it's still ours, the
- * VCOUNT IRQ given back as we found it (unless the game took it), a band
- * still up taken down. */
+ * VCOUNT IRQ given back as we found it (give_back, unless the game put a
+ * handler in its slot), a band still up taken down. */
 static void line_uninstall(int give_back)
 {
   volatile uint32_t* vec = irq_vector();
   const uint32_t cpsr = dscm_irq_off();
   if (*vec == WRAPPER)
     *vec = dscm_wrap_orig;
-  if (give_back && LW(LW_OWN) && CODE32(LW(LW_T2ADDR)) == LW(LW_T2VAL)) {
+  if (give_back && CODE32(LW(LW_T2ADDR)) == LW(LW_T2VAL)) {
     REG_IE &= ~4u;
     DISPSTAT = (uint16_t)(DISPSTAT & ~0x20);
     REG_IF = 4;
@@ -1297,6 +1326,8 @@ static uint32_t line_collect(uint32_t* cut)
   g_stats.line_spin = (uint16_t)(LW(LC_SPIN) < 0xFFFF ? LW(LC_SPIN) : 0xFFFF);
   g_stats.line_skipwhy = (uint8_t)LW(LC_SKIPWHY);
   g_stats.line_standdown = (uint8_t)LW(LC_STANDDOWN);
+  if (LW(LW_STAGE) == 2 && d[1])
+    g_line_used = 1;                           /* our mode 3 went out: the leak watch for good */
   *cut = d[3];
   return LW(LW_STAGE) == 0 ? d[0] : d[2] + d[3];
 }
@@ -1315,6 +1346,11 @@ static void line_check(void)
       NDMA_CNT(CH_FIFO) = 0;
     if ((DISPCNT & MODE_MASK) == MODE_3)
       DISPCNT_MODE = (uint8_t)(DISPCNT_MODE & ~2);
+    if (LW(LW_OWN) && CODE32(LW(LW_T2ADDR)) == LW(LW_T2VAL)) {
+      REG_IE &= ~4u;                           /* the game's new handler gets no VCOUNT IRQ of ours */
+      DISPSTAT = (uint16_t)(DISPSTAT & ~0x20);
+      REG_IF = 4;
+    }
     LW(LW_UP) = 0;
     LW(LW_STATE) = 0;
     dscm_dc_clean((const void*)dscm_wrap_words, 256);
@@ -1326,7 +1362,9 @@ static void line_check(void)
   }
   dscm_irq_restore(cpsr);
   if (!LW(LW_OWN)) {
-    line_uninstall(0);                         /* the VCOUNT IRQ is the game's now: ours left as they are */
+    /* left to the game: its VCOUNT setup stays as it is, except when it
+     * kept turning ours off (stand-down 4): then off as it wants it */
+    line_uninstall(LW(LC_STANDDOWN) == 4);
     g_line_off = 1;
   }
 }
@@ -1404,7 +1442,7 @@ static void tick(uint32_t frame)
     if (!line_wanted() || (g_cur.phase == P_FREE && !g_queue_count)) {
       line_publish(0);
       if (line_down())
-        line_uninstall(1);
+        line_uninstall(LW(LW_OWN) != 0);
     } else {
       line_publish(g_cur.phase >= P_IN && g_rendered && g_screen_frames >= SCREEN_STABLE ? visible_rows() : 0);
     }
@@ -1585,11 +1623,15 @@ void dscm_popup_reset(void)
   LW(LW_UP) = 0;
   dscm_dc_clean((const void*)dscm_wrap_words, 256);
   g_line = 0;
+  g_line_off = 0;
+  g_line_used = 0;
   g_armed = 0;
   g_cur.phase = P_FREE;
   g_queue_count = 0;
   g_rendered = 0;
   dscm_popup_active = 0;
+  memset(&g_dispoff, 0, sizeof(g_dispoff));    /* looked for again: the image may differ */
+  dscm_popup_watch = 1;
 }
 
 void dscm_popup_status(dss_display_status_t* out)

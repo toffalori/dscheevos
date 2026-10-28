@@ -31,6 +31,7 @@ static uintptr_t host_code(uint32_t a)
   return (uintptr_t)&junk;
 }
 #define POPUP_CODE(a) host_code(a)
+#define POPUP_LINE_ANY_SOURCE 1                /* no NWRAM here: the band stays in main RAM */
 
 /* start.s stand-ins */
 void dscm_irq_wrapper(void) {}
