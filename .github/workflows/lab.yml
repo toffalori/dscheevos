@@ -1,0 +1,20 @@
+name: Display lab
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Font (python3 on the runner; the devkitARM image has none)
+        run: |
+          mkdir -p tests/display-lab/out
+          python3 dscheevos/display/tools/fontgen.py external/nds-bootstrap extended_latin dsd_font_latin tests/display-lab/out/font_latin.c
+      - name: display-lab.nds
+        run: docker run --rm -v "$PWD:/src" -w /src devkitpro/devkitarm:20241104 make -C tests/display-lab BOOTSTRAP=/src/external/nds-bootstrap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: display-lab
+          path: tests/display-lab/out/display-lab.nds
