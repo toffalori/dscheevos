@@ -30,6 +30,12 @@ extern dscm_status_t dscm_g_status;   /* the in-game menu reads it: show stream 
 extern void dscm_publish_notify(uint32_t count);
 extern void dscm_publish_cues(uint32_t cues);
 
+/* popup.c: pop-ups on the console's own screen */
+void dscm_popup_on_popup(const uint8_t* body, uint16_t len);
+void dscm_popup_on_badge(const uint8_t* body, uint16_t len);
+void dscm_popup_set_mode(uint8_t mode);
+void dscm_popup_status(dss_display_status_t* out);
+
 /* ---- state ---- */
 
 static struct udp_pcb* g_pcb;
@@ -101,6 +107,16 @@ static void send_to(const ip_addr_t* ip, uint16_t port, const uint8_t* data, uin
 }
 
 /* ---- outgoing ---- */
+
+/* One packet to the paired phone (popup.c); nothing while unpaired. */
+void dscm_stream_send(uint8_t type, const void* body, uint16_t len)
+{
+  uint8_t buf[DSS_HEADER_SIZE + 64];
+  if (!g_paired || len > sizeof(buf) - DSS_HEADER_SIZE)
+    return;
+  memcpy(header(buf, type, g_session, len), body, len);
+  send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + len));
+}
 
 /* HELLO to everyone, and straight to the phone we know: a phone with its
  * screen off drops broadcasts after a few seconds, but still takes unicast. */
@@ -281,6 +297,7 @@ static void on_control(const uint8_t* body, uint16_t len)
   switch (body[0]) {
     case DSS_CTRL_FULL:  g_force_full = 1; break;
     case DSS_CTRL_RESET: g_frames_sent_total = g_frames_stale_total = g_peeks_answered = 0; break;
+    case DSS_CTRL_DISPLAY: dscm_popup_set_mode(body[1]); break;
     default: break;      /* DELTA on/off is automatic in this build */
   }
 }
@@ -350,6 +367,8 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
             case DSS_T_PEEK:      on_peek(body, length); break;
             case DSS_T_CONTROL:   on_control(body, length); break;
             case DSS_T_CUE:       on_cue(body, length); break;
+            case DSS_T_POPUP:     dscm_popup_on_popup(body, length); break;
+            case DSS_T_BADGE:     dscm_popup_on_badge(body, length); break;
             case DSS_T_KEEPALIVE: break;   /* liveness only */
             default: break;
           }
@@ -367,7 +386,7 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
 void dscm_stream_start(const char* hash, const char* game_code, const char* title, int dtcm_known)
 {
   memset(&g_hello, 0, sizeof(g_hello));
-  g_hello.caps = dtcm_known ? DSS_CAP_DTCM : 0;
+  g_hello.caps = (uint8_t)((dtcm_known ? DSS_CAP_DTCM : 0) | DSS_CAP_POPUP);
   g_hello.max_table_words = DSS_MAX_TABLE_WORDS;
   g_hello.max_chain_nodes = 0;
   if (hash)  memcpy(g_hello.hash, hash, strnlen(hash, sizeof(g_hello.hash)));
@@ -433,8 +452,9 @@ void dscm_stream_frame(uint32_t frame)
 /* STATUS for the phone's cart screen (every DSS_FULL_EVERY frames). */
 void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_max)
 {
-  uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_status_t)];
+  uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_status_t) + sizeof(dss_display_status_t)];
   dss_status_t s;
+  dss_display_status_t d;
   uint8_t* body;
   if (!g_paired)
     return;
@@ -447,7 +467,9 @@ void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_
   s.net_state = (uint8_t)net_state;
   s.shim_dead = 0;
   s.idle_lines_max = idle_lines_max;
-  body = header(buf, DSS_T_STATUS, g_session, (uint16_t)sizeof(dss_status_t));
+  dscm_popup_status(&d);
+  body = header(buf, DSS_T_STATUS, g_session, (uint16_t)(sizeof(dss_status_t) + sizeof(d)));
   memcpy(body, &s, sizeof(dss_status_t));
+  memcpy(body + sizeof(dss_status_t), &d, sizeof(d));   /* DSS_CAP_POPUP: the strip's counters */
   send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)sizeof(buf));
 }

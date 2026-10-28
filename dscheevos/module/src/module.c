@@ -31,6 +31,10 @@ int dscm_stream_net_init(void);
 void dscm_stream_service(uint32_t now_ms);
 void dscm_stream_frame(uint32_t frame);
 void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_max);
+/* src/popup.c: pop-ups on the console's screen, armed in idle time */
+void dscm_popup_init(void);
+void dscm_popup_idle(uint32_t frame);
+void dscm_popup_rearm(void);
 #endif
 
 #define REG_VCOUNT (*(volatile uint16_t*)0x04000006)
@@ -797,6 +801,7 @@ int module_init(const dscm_boot_t* boot)
   }
   if (dscm_stream_net_init() != 0)
     dscm_g_status.error = DSCM_ERROR_NO_MEMORY;
+  dscm_popup_init();
 #else
   /* nothing reads the session's replies or CA from here on */
   heap_release_session();
@@ -1054,6 +1059,8 @@ WAKE_CODE int module_idle(int idle_loop)
 /* Cheevotron streamer idle: once per new frame, service the Wi-Fi link and
  * send the watched words to the phone. No evaluation and no snapshot arena;
  * the only timing care is masking IRQs while the words are read (stream.c).
+ * A pop-up's band is armed first (it has a deadline in the frame), and again
+ * after the network work if an IRQ ended it meanwhile (popup.c).
  * Always returns 0, so the game's own OS_Halt runs after. */
 int module_idle(int idle_loop)
 {
@@ -1063,6 +1070,7 @@ int module_idle(int idle_loop)
   if (dscm_lock(&H.busy))
     return 0;
   c = dscm_vblank_count_read();
+  dscm_popup_idle(c);
   if (c != dscm_irq.last_vblank) {
     dscm_irq.last_vblank = c;
     dscm_irq.frames = c;
@@ -1082,6 +1090,7 @@ int module_idle(int idle_loop)
   } else {
     dscm_stream_service(dscm_millis());   /* HELLO cadence and liveness while unpaired */
   }
+  dscm_popup_rearm();
   H.busy = 0;
   return 0;
 }

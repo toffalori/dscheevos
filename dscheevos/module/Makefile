@@ -70,10 +70,16 @@ SRC := src/module.c src/syscalls.c src/heap.c src/fast_strtoul.c $(CORE)/src/dsc
 # Cheevotron streamer build: send the watched RAM words to the phone instead of
 # evaluating on the console (src/stream.c; module.c swaps its init and idle).
 ifeq ($(STREAM),1)
-CFLAGS += -DDSCM_STREAM
-SRC += src/stream.c
+CFLAGS += -DDSCM_STREAM -I../display/include
+SRC += src/stream.c src/popup.c
+# Pop-ups (src/popup.c): the display library's text mapping, and nds-bootstrap's
+# in-game menu font, generated into gen/ before the build (the devkitARM image
+# has no python): python3 ../display/tools/fontgen.py ../../external/nds-bootstrap
+#   extended_latin dsd_font_latin gen/font_latin.c
+DISPLAY_SRC := ../display/src/dsd_render.c ../display/src/dsd_sched.c ../display/src/dsd_badge.c gen/font_latin.c
 endif
 OBJ := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(SRC))) $(patsubst $(RCHEEVOS)/src/%.c,$(BUILD)/rc/%.o,$(RC_SRC)) $(BUILD)/start.o \
+  $(patsubst %.c,$(BUILD)/display/%.o,$(notdir $(DISPLAY_SRC))) \
   $(patsubst $(LWIP)/src/%.c,$(BUILD)/lwip/%.o,$(LWIP_SRC)) $(patsubst $(MBEDTLS)/library/%.c,$(BUILD)/tls/%.o,$(TLS_SRC)) \
   $(patsubst %.c,$(BUILD)/net/%.o,$(notdir $(NET_SRC)))
 
@@ -124,6 +130,14 @@ $(BUILD)/net/cacerts.o: $(TLSCONF)/cacerts.c
 $(BUILD)/start.o: src/start.s
 	@mkdir -p $(BUILD)
 	$(CC) $(ARCH) -Wa,--defsym,STACK_GAP=$(STACK_GAP) -c $< -o $@
+$(BUILD)/display/%.o: ../display/src/%.c ../display/include/dsd.h include/dscheevos_module.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/display/%.o: gen/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+gen/font_latin.c:
+	$(error gen/font_latin.c is missing: run python3 ../display/tools/fontgen.py ../../external/nds-bootstrap extended_latin dsd_font_latin gen/font_latin.c first)
 
 $(BUILD)/dscheevos9.elf: $(OBJ) module.ld module-cached.ld hot.ld warm.ld hot-rodata.ld
 	$(CC) $(LDFLAGS) $(OBJ) -lc -lm -lgcc -o $@

@@ -357,6 +357,106 @@ dscm_dtcm_base:
 
 	.pool
 
+@ The pop-up strip's abort (popup.c, the Cheevotron streamer build; other
+@ builds don't reference it, and --gc-sections drops it). While a strip is armed, the BIOS's IRQ
+@ entry jumps here through [DTCM+0x3FFC] instead of to the game's handler; the
+@ arming put us there with IRQs masked, right before the game's halt. The first
+@ IRQ of any kind, before any game code runs:
+@  - puts the game's handler back on the vector (so this runs once per arming);
+@  - notes the line and IE & IF, for the strip's statistics;
+@  - stops our two NDMA channels, recognised by their destinations (NDMA3
+@    writes DISPCNT from a table at each H-Blank, NDMA2 feeds the display FIFO),
+@    the DISPCNT writer first, and waits a little for a write already in flight;
+@  - puts display mode 1 back if the band left mode 3 (the game never uses it:
+@    the arming checks for mode 1), byte 2 of DISPCNT only;
+@  - jumps to the game's handler, with r0 (DTCM + 0x4000, from the BIOS) and lr
+@    (the BIOS's return) as the BIOS left them.
+@ So no game code ever sees mode 3, and no DISPCNT write of the game's can be
+@ overwritten by a table entry. Only r1-r3 and r12 change (the BIOS saved them)
+@ and nothing goes on the stack: the game's handler finds the IRQ stack as the
+@ BIOS left it. The words after the code are its data, read and written as
+@ data through this code's own (main RAM) address, as popup.c does: one view.
+	.pushsection .text.popup, "ax"
+	.arm
+	.align	2
+	.equ	WRAP_ORIG, 0                @ the words after the code, from dscm_wrap_orig
+	.equ	WRAP_HITS, 4
+	.equ	WRAP_LINE, 8
+	.equ	WRAP_IRQS, 12
+	.global dscm_irq_wrapper
+	.type dscm_irq_wrapper, %function
+dscm_irq_wrapper:
+	adr	r3, dscm_wrap_orig          @ r3: our words (WRAP_*)
+	ldr	r1, [r3, #WRAP_ORIG]
+	str	r1, [r0, #-4]               @ the game's handler back on the vector, first
+	mov	r12, #0x04000000
+	ldrh	r2, [r12, #6]               @ VCOUNT
+	str	r2, [r3, #WRAP_LINE]
+	ldr	r2, [r12, #0x210]           @ IE
+	ldr	r1, [r12, #0x214]           @ IF
+	and	r2, r2, r1
+	str	r2, [r3, #WRAP_IRQS]
+	ldr	r2, [r3, #WRAP_HITS]
+	add	r2, r2, #1
+	str	r2, [r3, #WRAP_HITS]
+	add	r12, r12, #0x4100           @ the NDMA registers
+	mov	r3, #0
+	ldr	r2, [r12, #0x70]            @ NDMA3CNT
+	tst	r2, #0x80000000
+	beq	2f
+	ldr	r2, [r12, #0x5C]            @ NDMA3DAD: ours writes DISPCNT
+	cmp	r2, #0x04000000
+	bne	2f
+	str	r3, [r12, #0x70]
+	mov	r1, #64                     @ bounded: an H-Blank word in flight lands first
+1:	ldr	r2, [r12, #0x70]
+	tst	r2, #0x80000000
+	subsne	r1, r1, #1
+	bne	1b
+2:	ldr	r2, [r12, #0x54]            @ NDMA2CNT
+	tst	r2, #0x80000000
+	beq	3f
+	ldr	r2, [r12, #0x40]            @ NDMA2DAD: ours feeds DISP_MMEM_FIFO
+	sub	r2, r2, #0x04000000
+	cmp	r2, #0x68
+	streq	r3, [r12, #0x54]
+3:	mov	r12, #0x04000000
+	ldrb	r2, [r12, #2]               @ DISPCNT bits 16-23: the display mode in bits 0-1
+	and	r1, r2, #3
+	cmp	r1, #3
+	bne	4f
+	bic	r2, r2, #3
+	orr	r2, r2, #1
+	strb	r2, [r12, #2]
+	ldrb	r2, [r12, #2]               @ once more, should a last table word have landed
+	and	r1, r2, #3
+	cmp	r1, #3
+	biceq	r2, r2, #3
+	orreq	r2, r2, #1
+	strbeq	r2, [r12, #2]
+4:	adr	r1, dscm_wrap_orig
+	ldr	r1, [r1, #WRAP_ORIG]
+	bx	r1
+	.global dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs
+dscm_wrap_orig:
+	.word	0                           @ the game's IRQ handler, saved at arming
+dscm_wrap_hits:
+	.word	0                           @ entries so far (one per arming)
+dscm_wrap_line:
+	.word	0                           @ VCOUNT at the last entry
+dscm_wrap_irqs:
+	.word	0                           @ IE & IF at the last entry
+	.size dscm_irq_wrapper, . - dscm_irq_wrapper
+
+@ uint32_t dscm_cp15_control(void): CP15 c1, the control register (bit 13:
+@ high exception vectors, so the BIOS's IRQ entry reads [DTCM+0x3FFC]).
+	.global dscm_cp15_control
+	.type dscm_cp15_control, %function
+dscm_cp15_control:
+	mrc	p15, 0, r0, c1, c0, 0
+	bx	lr
+	.popsection
+
 @ Flush: nds-bootstrap's ARM9 calls it with the game stopped, before the ARM7
 @ copies the journal (in-game menu, reset). The module stack is free unless
 @ idle work is running or parked there (in_halt, test and set as halt_entry

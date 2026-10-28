@@ -24,6 +24,10 @@ jobs:
           gcc -O2 -static external/nds-bootstrap/lzss.c -o "$RUNNER_TEMP/lzss"
           docker run --rm -v "$PWD:/src" -v "$RUNNER_TEMP/lzss:/usr/local/bin/lzss:ro" -w /src/external/nds-bootstrap \
             devkitpro/devkitarm:20241104 bash -c 'git config --global safe.directory "*" && make package-nightly'
+      - name: Pop-up font (python3 on the runner; the devkitARM image has none)
+        run: |
+          mkdir -p dscheevos/module/gen
+          python3 dscheevos/display/tools/fontgen.py external/nds-bootstrap extended_latin dsd_font_latin dscheevos/module/gen/font_latin.c
       - name: Module
         run: docker run --rm -v "$PWD:/src" -w /src devkitpro/devkitarm:20241104 make -C dscheevos/module
       - name: Loader (nds-bootloader)
