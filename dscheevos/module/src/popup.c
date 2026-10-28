@@ -85,7 +85,7 @@ extern void dscm_dc_clean(const void* addr, uint32_t len);
 #define MODE_3         0x30000u
 #define LAST_LINE      190                     /* the band ends here; line 191 is the game's */
 #define POWCNT1_TOP    0x8000u                 /* engine A on the top screen */
-#define SCREEN_STABLE  30                      /* frames engine A stays on one screen before a band */
+#define SCREEN_STABLE  8                       /* frames engine A stays on one screen before a band (a class-E game swaps every frame) */
 
 /* ---- the band ---- */
 
