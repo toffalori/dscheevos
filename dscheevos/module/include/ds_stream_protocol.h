@@ -262,9 +262,15 @@ typedef struct __attribute__((packed)) {
   uint32_t skip_vector;    /* the IRQ vector or the high-vector bit */
   uint32_t skip_screen;    /* the main engine changed screens recently */
   uint32_t vector_lost;    /* the IRQ vector changed under an armed band (a soft reset, or the game) */
-  uint16_t fifo_words;     /* the display FIFO's depth, measured at start (the band's feed starts that far in) */
+  uint16_t reserved4;      /* 0 (was a FIFO depth measurement) */
   uint8_t  nwram;          /* the last band was fed from shared WRAM (else main RAM) */
   uint8_t  reserved3;
-} dss_display_status_t;    /* 64; the skips count frames, once per reason */
+  /* while pop-ups are up, why frames went without the band */
+  uint32_t shown_bits;     /* the last 32 frames, bit 0 the newest: 1 = the band was drawn (whole or cut) */
+  uint32_t wake_early;     /* no band, though the game was idle in time (an IRQ, a skip reason) */
+  uint32_t wake_late;      /* no band: the game first idled during the band's lines */
+  uint32_t wake_vblank;    /* no band: the game idled only in VBlank */
+  uint32_t wake_none;      /* no band: the game never idled in the frame */
+} dss_display_status_t;    /* 84; the skips count frames, once per reason */
 
 #endif

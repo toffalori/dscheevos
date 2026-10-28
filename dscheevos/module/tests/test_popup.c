@@ -148,6 +148,14 @@ static void frame(void)
   }
 }
 
+/* One frame the game idles only at line vc: too late for the band, or an IRQ is due. */
+static void idle_only(uint16_t vc)
+{
+  REG16(0x04000006) = vc;
+  dscm_popup_idle(++t_frame);
+  dscm_popup_rearm();
+}
+
 /* Runs a pop-up to its end; returns the frames it took, writes its band once it holds. */
 static int run(const char* image, int rows, int dump_mode)
 {
@@ -217,6 +225,36 @@ int main(int argc, char** argv)
                                           "Super Mario 64 DS", "Ready! 12 of 45 unlocked", ""));
   snprintf(path, sizeof(path), "%s/ready.ppm", argv[2]);
   run(path, TOAST_ROWS, 1);
+  expect_states(life, 3);
+
+  /* telemetry: every frame so far had the band; then frames the game was
+   * busy into the band, idle only in VBlank, idle in time with an IRQ due,
+   * and never idle */
+  if (g_stats.shown_bits != 0xFFFFFFFFu || g_stats.wake_early || g_stats.wake_late || g_stats.wake_vblank || g_stats.wake_none) {
+    printf("FAIL: telemetry after clean runs: bits %08x early %u late %u vblank %u none %u\n", g_stats.shown_bits,
+           g_stats.wake_early, g_stats.wake_late, g_stats.wake_vblank, g_stats.wake_none);
+    return 1;
+  }
+  dscm_popup_on_popup(g_pkt, popup_packet(9, DSS_POPUP_TEST, DSS_POPUP_SMALL, 0, 0, "", "x", "", ""));
+  while (g_cur.phase != P_HOLD)
+    frame();
+  for (i = 0; i < 3; i++)
+    idle_only(189);
+  for (i = 0; i < 2; i++)
+    idle_only(200);
+  REG_IF = 1;
+  idle_only(170);
+  REG_IF = 0;
+  t_frame += 2;
+  frame();
+  frame();
+  if (g_stats.wake_late != 3 || g_stats.wake_vblank != 2 || g_stats.wake_early != 1 || g_stats.wake_none != 2
+      || (g_stats.shown_bits & 0x3FF) != 0x201) {
+    printf("FAIL: telemetry: bits %08x early %u late %u vblank %u none %u\n", g_stats.shown_bits,
+           g_stats.wake_early, g_stats.wake_late, g_stats.wake_vblank, g_stats.wake_none);
+    return 1;
+  }
+  run(path, SMALL_ROWS, 0);
   expect_states(life, 3);
 
   /* a repeat of a finished one gets its last state again, and isn't shown again */

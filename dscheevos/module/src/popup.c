@@ -121,15 +121,7 @@ static uint32_t g_table_src;                   /* where NDMA3 reads the table: N
 static uint32_t g_src;                         /* the band's first word for the FIFO */
 static uint8_t  g_nwram;                       /* g_src is the NWRAM window */
 
-/* The display FIFO keeps the words it holds when its DMA stops: they come out
- * first at the next band, so each line would start that many words late. It
- * is filled to the top before every arming (fifo_fill), and the band's feed
- * starts that many words in (g_fifo_words, measured at start-up). */
-static uint16_t g_fifo_words;
-static const uint32_t g_edge_words[4] = {
-  0x3D493D49u, 0x3D493D49u, 0x3D493D49u, 0x3D493D49u,   /* C_EDGE (RGB 9, 10, 15) twice: the top row's first words */
-};
-static uint32_t g_table_base;                  /* what g_table holds: the game's DISPCNT, */
+static uint32_t g_table_base;                 /* what g_table holds: the game's DISPCNT, */
 static uint16_t g_table_first;                 /* the band's first line, */
 static uint8_t  g_table_mode;                  /* and the display mode (0 or 0xFF: not built) */
 
@@ -187,6 +179,10 @@ static uint16_t g_screen_frames;               /* frames engine A stayed on the 
 static uint16_t g_screen_last;
 static uint32_t g_fifo_frame;                  /* the frame the FIFO channel was last started in */
 static uint8_t  g_skips_seen;                  /* SKIP(): reasons counted in this frame */
+static uint8_t  g_wakes;                       /* W_*: where this frame's idle wakes fell, while a band was wanted */
+#define W_EARLY  1                             /* in time to arm the band */
+#define W_LATE   2                             /* too late: at or in the band's lines */
+#define W_VBLANK 4                             /* in the VBlank before the frame's lines */
 #define VECTOR_LOST_MAX 3                      /* the vector changed under an armed band this often: off */
 static uint8_t  g_rendered;                    /* g_band holds g_cur */
 static uint16_t g_rows;                        /* g_cur's band height */
@@ -558,38 +554,6 @@ static void render(void)
 
 /* ---- the strip ---- */
 
-/* One 4-word block of the edge colour into the display FIFO, if it has room
- * (lines in mode 1 don't drain it): 1 if it went in. NDMA2, while no band is
- * armed. Bounded. */
-static int fifo_push_block(void)
-{
-  int i;
-  NDMA_CNT(CH_FIFO) = 0;
-  NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_edge_words);
-  NDMA_DAD(CH_FIFO) = MMEM_FIFO;
-  NDMA_TCNT(CH_FIFO) = 4;
-  NDMA_WCNT(CH_FIFO) = 4;
-  NDMA_BCNT(CH_FIFO) = 0;
-  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x09) | NDMA_PHYS(2) | NDMA_DFIX;
-  for (i = 0; i < 64; i++)
-    if (!(NDMA_CNT(CH_FIFO) & NDMA_ON))
-      return 1;
-  NDMA_CNT(CH_FIFO) = 0;                       /* full: the block stays out */
-  return 0;
-}
-
-/* The FIFO filled to the top with the edge colour; the words it took. */
-static uint32_t fifo_fill(void)
-{
-  uint32_t words = 0;
-  int k;
-  for (k = 0; k < 32 && fifo_push_block(); k++)
-    words += 4;
-  return words;
-}
-
-/* g_band (cleaned) into the NWRAM window by DMA, NDMA2 while no band is
- * armed; 1 if a few words read back by DMA match. */
 /* words from src to dst (physical addresses) by DMA at once, NDMA2 while no
  * band is armed; 1 when done. Bounded. */
 static int dma_copy(uint32_t src, uint32_t dst, uint32_t words)
@@ -610,6 +574,8 @@ static int dma_copy(uint32_t src, uint32_t dst, uint32_t words)
   return 1;
 }
 
+/* g_band (cleaned) into the NWRAM window by DMA, NDMA2 while no band is
+ * armed; 1 if a few words read back by DMA match. */
 static int copy_to_nwram(void)
 {
   static uint32_t check[8] __attribute__((aligned(32)));
@@ -815,9 +781,6 @@ static void arm(void)
     SKIP(skip_display, 2);                     /* DISPCNT changed since the table: next wake */
     goto out;
   }
-  /* the FIFO full, so it holds exactly g_fifo_words when the band starts */
-  if (g_mode >= DSS_DISPLAY_ON)
-    fifo_fill();
   /* Out of this line's H-Blank (bounded), so its H-Blank trigger is still to
    * come and the table's first word lands at the end of this line. */
   for (i = 0; i < 256 && (DISPSTAT & 0x02); i++) {}
@@ -855,13 +818,11 @@ static void arm(void)
     if (g_mode >= DSS_DISPLAY_ON) {
       /* NDMA2: the band's rows (and the margin) into the display FIFO; mode 1
        * lines don't drain it, so it is ready when the band's first line comes.
-       * While it slides, the band's lower rows show: it rises from the edge.
-       * The words already in the FIFO (edge colour) come out first: the feed
-       * starts that many words into the first row, so every row lines up. */
+       * While it slides, the band's lower rows show: it rises from the edge. */
       NDMA_CNT(CH_FIFO) = 0;
-      NDMA_SAD(CH_FIFO) = g_src + (uint32_t)(g_rows - rows) * 512 + g_fifo_words * 4u;
+      NDMA_SAD(CH_FIFO) = g_src + (uint32_t)(g_rows - rows) * 512;
       NDMA_DAD(CH_FIFO) = MMEM_FIFO;
-      NDMA_TCNT(CH_FIFO) = (uint32_t)(rows + MARGIN) * 128 - g_fifo_words;
+      NDMA_TCNT(CH_FIFO) = (uint32_t)(rows + MARGIN) * 128;
       NDMA_WCNT(CH_FIFO) = 4;
       NDMA_BCNT(CH_FIFO) = 0;
       NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x09) | NDMA_PHYS(2) | NDMA_DFIX;
@@ -920,6 +881,21 @@ static void tick(uint32_t frame)
     g_cur.st.frames_cut++;
   g_shown_seen = g_stats.frames_shown;
   g_cut_seen = g_stats.frames_cut;
+  if (g_wakes) {
+    /* the frame just ended wanted the band: drawn, or where the game left
+     * time for it; the frames since had no idle wake at all */
+    g_stats.shown_bits = passed >= 32 ? 0 : (g_stats.shown_bits << 1 | (showed ? 1u : 0u)) << (passed - 1);
+    if (!showed) {
+      if (g_wakes & W_EARLY)
+        g_stats.wake_early++;
+      else if (g_wakes & W_LATE)
+        g_stats.wake_late++;
+      else
+        g_stats.wake_vblank++;
+    }
+    g_stats.wake_none += passed - 1;
+    g_wakes = 0;
+  }
 
   if (g_mode == DSS_DISPLAY_OFF || g_standdown) {
     /* everything waiting is refused, one a frame (the ARM7's send ring is small) */
@@ -1007,14 +983,7 @@ void dscm_popup_init(void)
     g_nwram = fat_off >= fnt_off && fat_off - fnt_off <= NW_BASE - NW_FNTFAT
               && fat_size <= NW_BASE - NW_FNTFAT - (fat_off - fnt_off);
   }
-  /* How many words the display FIFO holds: it is empty now (nothing has fed
-   * it), so the blocks it takes until full. Left full of the edge colour. */
-  {
-    const uint32_t words = fifo_fill();
-    g_fifo_words = (uint16_t)(words <= 64 ? words : 0);
-  }
   g_src = DSCM_PHYS(g_band);
-  g_stats.fifo_words = g_fifo_words;
 }
 
 void dscm_popup_set_mode(uint8_t mode)
@@ -1028,6 +997,24 @@ void dscm_popup_set_mode(uint8_t mode)
 static void update_active(void)
 {
   dscm_popup_active = (uint8_t)(g_cur.phase != P_FREE || g_queue_count || g_armed);
+  if (!dscm_popup_active)
+    g_wakes = 0;                               /* the next tick may be minutes on */
+}
+
+/* Where this idle wake fell against the band's deadline (telemetry). The
+ * frames a new pop-up waits for the screen to settle don't count: the pop-up
+ * starts later, it doesn't flicker. */
+static void note_wake(void)
+{
+  const uint32_t vc = VCOUNT;
+  if (g_screen_frames < SCREEN_STABLE)
+    return;
+  if (vc >= 192)
+    g_wakes |= W_VBLANK;
+  else if (vc + 2 <= (uint32_t)(LAST_LINE + 1 - visible_rows()))
+    g_wakes |= W_EARLY;
+  else
+    g_wakes |= W_LATE;
 }
 
 /* Each idle pass while a pop-up is waiting, up or armed (dscm_popup_active),
@@ -1038,8 +1025,10 @@ void dscm_popup_idle(uint32_t frame)
   collect();
   if (frame != g_frame)
     tick(frame);
-  if (g_cur.phase >= P_IN && g_rendered)
+  if (g_cur.phase >= P_IN && g_rendered) {
+    note_wake();
     arm();
+  }
   update_active();
 }
 
