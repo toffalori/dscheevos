@@ -130,10 +130,10 @@ static void badge_packets(uint16_t id, int side)
 
 static uint32_t t_frame = 1000;
 
-/* One frame: the game idles at line 100, the band is armed, the VBlank enters the wrapper. */
+/* One frame: the game idles at line 154, the band is armed, the VBlank enters the wrapper. */
 static void frame(void)
 {
-  REG16(0x04000006) = 100;
+  REG16(0x04000006) = 154;   /* idle a few lines before a toast band: armed at once */
   dscm_popup_idle(++t_frame);
   dscm_popup_rearm();
   if (g_vector == WRAPPER) {
@@ -237,7 +237,7 @@ int main(int argc, char** argv)
   /* the vector changed under an armed band (a soft reset): the band is stopped;
    * the third time, pop-ups stand down for the game */
   dscm_popup_on_popup(g_pkt, popup_packet(6, DSS_POPUP_TEST, DSS_POPUP_TOAST, 0, 0, "", "x", "", ""));
-  REG16(0x04000006) = 100;
+  REG16(0x04000006) = 154;
   dscm_popup_idle(++t_frame);
   for (i = 0; i < VECTOR_LOST_MAX; i++) {
     dscm_popup_idle(++t_frame);

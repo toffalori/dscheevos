@@ -85,7 +85,8 @@ extern void dscm_dc_clean(const void* addr, uint32_t len);
 #define MODE_3         0x30000u
 #define LAST_LINE      190                     /* the band ends here; line 191 is the game's */
 #define POWCNT1_TOP    0x8000u                 /* engine A on the top screen */
-#define SCREEN_STABLE  8                       /* frames engine A stays on one screen before a band (a class-E game swaps every frame) */
+#define ARM_LEAD       6                       /* lines before the band's first line the band is armed */
+#define SCREEN_STABLE  8                      /* frames engine A stays on one screen before a band (a class-E game swaps every frame) */
 
 /* ---- the band ---- */
 
@@ -648,6 +649,20 @@ static void arm(void)
     g_table_mode = g_mode;
     g_table_base = d;
     g_table_first = (uint16_t)first;
+  }
+  /* Arm late, a few lines before the band's first line: an IRQ between the
+   * arming and the band ends it before it starts, and costs the frame (the
+   * FIFO can't be fed twice in one frame: hardware run 3 showed the second
+   * feed garbled). Until then this idle thread watches the line with IRQs
+   * on: a game IRQ runs as usual, and a thread it wakes takes the CPU as it
+   * would from the halt. Bounded: a frame is 263 lines. */
+  vc = VCOUNT;
+  if (vc < 192 && vc + ARM_LEAD < first) {
+    for (i = 0; i < 400000; i++) {
+      vc = VCOUNT;
+      if (vc + ARM_LEAD >= first || vc >= 192)
+        break;
+    }
   }
 
   cpsr = dscm_irq_off();
