@@ -116,6 +116,8 @@ static uint32_t g_table[192] __attribute__((aligned(32)));   /* DISPCNT per line
  * protection unit may not let the CPU at it. Main RAM if the window is taken. */
 #define NW_BASE    0x03760000u
 #define NW_FNTFAT  0x03700000u
+#define NW_TABLE   (NW_BASE + 0x5000u)         /* the DISPCNT table, after the band */
+static uint32_t g_table_src;                   /* where NDMA3 reads the table: NW_TABLE or g_table */
 static uint32_t g_src;                         /* the band's first word for the FIFO */
 static uint8_t  g_nwram;                       /* g_src is the NWRAM window */
 
@@ -588,35 +590,37 @@ static uint32_t fifo_fill(void)
 
 /* g_band (cleaned) into the NWRAM window by DMA, NDMA2 while no band is
  * armed; 1 if a few words read back by DMA match. */
+/* words from src to dst (physical addresses) by DMA at once, NDMA2 while no
+ * band is armed; 1 when done. Bounded. */
+static int dma_copy(uint32_t src, uint32_t dst, uint32_t words)
+{
+  int i;
+  if (NDMA_CNT(CH_FIFO) & NDMA_ON)
+    return 0;
+  NDMA_SAD(CH_FIFO) = src;
+  NDMA_DAD(CH_FIFO) = dst;
+  NDMA_WCNT(CH_FIFO) = words;
+  NDMA_BCNT(CH_FIFO) = 0;
+  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(3);
+  for (i = 0; i < 200000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
+  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
+    NDMA_CNT(CH_FIFO) = 0;
+    return 0;
+  }
+  return 1;
+}
+
 static int copy_to_nwram(void)
 {
   static uint32_t check[8] __attribute__((aligned(32)));
   const uint32_t* words = (const uint32_t*)g_band;
   const uint32_t at = 2 * 128;                 /* row 2: the label's line */
   int i;
-  if (NDMA_CNT(CH_FIFO) & NDMA_ON)
+  if (!dma_copy(DSCM_PHYS(g_band), NW_BASE, BAND_WORDS))
     return 0;
-  NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_band);
-  NDMA_DAD(CH_FIFO) = NW_BASE;
-  NDMA_WCNT(CH_FIFO) = BAND_WORDS;
-  NDMA_BCNT(CH_FIFO) = 0;
-  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(4);
-  for (i = 0; i < 200000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
-  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
-    NDMA_CNT(CH_FIFO) = 0;
-    return 0;
-  }
-  NDMA_SAD(CH_FIFO) = NW_BASE + at * 4;
-  NDMA_DAD(CH_FIFO) = DSCM_PHYS(check);
-  NDMA_WCNT(CH_FIFO) = 8;
-  NDMA_BCNT(CH_FIFO) = 0;
   dscm_dc_invalidate(check, sizeof(check));
-  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(3);
-  for (i = 0; i < 10000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
-  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
-    NDMA_CNT(CH_FIFO) = 0;
+  if (!dma_copy(NW_BASE + at * 4, DSCM_PHYS(check), 8))
     return 0;
-  }
   dscm_dc_invalidate(check, sizeof(check));
   for (i = 0; i < 8; i++)
     if (check[i] != words[at + i])
@@ -751,6 +755,9 @@ static void arm(void)
     for (l = 0; l < 192; l++)
       g_table[l] = (g_mode >= DSS_DISPLAY_ON && l >= first && l <= LAST_LINE) ? ((d & ~MODE_MASK) | MODE_3) : d;
     dscm_dc_clean(g_table, sizeof(g_table));
+    /* in NWRAM next to the band, like it: its word each H-Blank is never
+     * held up on the main RAM bus (a late one starts the band mid-line) */
+    g_table_src = (g_nwram && dma_copy(DSCM_PHYS(g_table), NW_TABLE, 192)) ? NW_TABLE : DSCM_PHYS(g_table);
     g_table_mode = g_mode;
     g_table_base = d;
     g_table_first = (uint16_t)first;
@@ -835,7 +842,7 @@ static void arm(void)
   if (g_mode >= DSS_DISPLAY_NOOP) {
     /* NDMA3: from the H-Blank of this line, the next line's word each H-Blank */
     NDMA_CNT(CH_DISPCNT) = 0;
-    NDMA_SAD(CH_DISPCNT) = DSCM_PHYS(&g_table[vc + 1]);
+    NDMA_SAD(CH_DISPCNT) = g_table_src + (vc + 1) * 4;
     NDMA_DAD(CH_DISPCNT) = 0x04000000u;
     NDMA_TCNT(CH_DISPCNT) = 191 - vc;
     NDMA_WCNT(CH_DISPCNT) = 1;
