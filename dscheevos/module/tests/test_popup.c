@@ -14,6 +14,8 @@ static uint8_t g_io[0x5000];
 static volatile uint32_t g_vector;
 #define POPUP_IO(a) ((uintptr_t)(g_io + ((a) - 0x04000000u)))
 #define POPUP_HOST_VECTOR (&g_vector)
+static uint8_t g_header[0x200];              /* the game's header: no FNT/FAT */
+#define POPUP_NDS_HEADER ((uintptr_t)g_header)
 
 /* start.s stand-ins */
 void dscm_irq_wrapper(void) {}
@@ -23,6 +25,7 @@ uint32_t dscm_dtcm_base(void) { return 0x027C0000u; }
 uint32_t dscm_irq_off(void) { return 0; }
 void dscm_irq_restore(uint32_t cpsr) { (void)cpsr; }
 void dscm_dc_clean(const void* addr, uint32_t len) { (void)addr; (void)len; }
+void dscm_dc_invalidate(const void* addr, uint32_t len) { (void)addr; (void)len; }
 
 /* stream.c stand-in: the states the phone would get */
 static uint8_t g_sent_states[64];

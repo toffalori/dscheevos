@@ -47,11 +47,15 @@ extern uint32_t dscm_dtcm_base(void);
 extern uint32_t dscm_irq_off(void);
 extern void dscm_irq_restore(uint32_t cpsr);
 extern void dscm_dc_clean(const void* addr, uint32_t len);
+extern void dscm_dc_invalidate(const void* addr, uint32_t len);
 
 /* The host test (tests/popup) puts the registers and the IRQ vector in plain
  * memory; on the console these are the addresses themselves. */
 #ifndef POPUP_IO
 #define POPUP_IO(a) (a)
+#endif
+#ifndef POPUP_NDS_HEADER
+#define POPUP_NDS_HEADER 0x027FFE00u           /* the game's header, where its boot left it */
 #endif
 #define REG8(a)  (*(volatile uint8_t*)POPUP_IO(a))
 #define REG16(a) (*(volatile uint16_t*)POPUP_IO(a))
@@ -99,7 +103,30 @@ extern void dscm_dc_clean(const void* addr, uint32_t len);
 #define BADGE_WAIT 30                          /* frames a pop-up waits for its badge's chunks */
 
 static uint16_t g_band[256 * (TOAST_ROWS + MARGIN)] __attribute__((aligned(32)));
+#define BAND_WORDS ((TOAST_ROWS + MARGIN) * 128)
 static uint32_t g_table[192] __attribute__((aligned(32)));   /* DISPCNT per line */
+
+/* Where the display FIFO is fed from. Main RAM was starved in a game (its
+ * sound and card DMA share that bus: rows came out shifted against each
+ * other on hardware), so the band is copied by DMA into shared WRAM (NWRAM,
+ * proven as a FIFO source in the display lab's D1n and P1), mapped to the
+ * ARM9 by the game boot at 0x03700000-0x0377FFFF: the window at 0x03760000,
+ * above nds-bootstrap's copy of the game's FNT/FAT at 0x03700000 and below
+ * its colour LUT's tables (that option must stay off). DMA only: the game's
+ * protection unit may not let the CPU at it. Main RAM if the window is taken. */
+#define NW_BASE    0x03760000u
+#define NW_FNTFAT  0x03700000u
+static uint32_t g_src;                         /* the band's first word for the FIFO */
+static uint8_t  g_nwram;                       /* g_src is the NWRAM window */
+
+/* The display FIFO keeps the words it holds when its DMA stops: they come out
+ * first at the next band, so each line would start that many words late. It
+ * is filled to the top before every arming (fifo_fill), and the band's feed
+ * starts that many words in (g_fifo_words, measured at start-up). */
+static uint16_t g_fifo_words;
+static const uint32_t g_edge_words[4] = {
+  0x3D493D49u, 0x3D493D49u, 0x3D493D49u, 0x3D493D49u,   /* C_EDGE (RGB 9, 10, 15) twice: the top row's first words */
+};
 static uint32_t g_table_base;                  /* what g_table holds: the game's DISPCNT, */
 static uint16_t g_table_first;                 /* the band's first line, */
 static uint8_t  g_table_mode;                  /* and the display mode (0 or 0xFF: not built) */
@@ -529,6 +556,84 @@ static void render(void)
 
 /* ---- the strip ---- */
 
+/* One 4-word block of the edge colour into the display FIFO, if it has room
+ * (lines in mode 1 don't drain it): 1 if it went in. NDMA2, while no band is
+ * armed. Bounded. */
+static int fifo_push_block(void)
+{
+  int i;
+  NDMA_CNT(CH_FIFO) = 0;
+  NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_edge_words);
+  NDMA_DAD(CH_FIFO) = MMEM_FIFO;
+  NDMA_TCNT(CH_FIFO) = 4;
+  NDMA_WCNT(CH_FIFO) = 4;
+  NDMA_BCNT(CH_FIFO) = 0;
+  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x09) | NDMA_PHYS(2) | NDMA_DFIX;
+  for (i = 0; i < 64; i++)
+    if (!(NDMA_CNT(CH_FIFO) & NDMA_ON))
+      return 1;
+  NDMA_CNT(CH_FIFO) = 0;                       /* full: the block stays out */
+  return 0;
+}
+
+/* The FIFO filled to the top with the edge colour; the words it took. */
+static uint32_t fifo_fill(void)
+{
+  uint32_t words = 0;
+  int k;
+  for (k = 0; k < 32 && fifo_push_block(); k++)
+    words += 4;
+  return words;
+}
+
+/* g_band (cleaned) into the NWRAM window by DMA, NDMA2 while no band is
+ * armed; 1 if a few words read back by DMA match. */
+static int copy_to_nwram(void)
+{
+  static uint32_t check[8] __attribute__((aligned(32)));
+  const uint32_t* words = (const uint32_t*)g_band;
+  const uint32_t at = 2 * 128;                 /* row 2: the label's line */
+  int i;
+  if (NDMA_CNT(CH_FIFO) & NDMA_ON)
+    return 0;
+  NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_band);
+  NDMA_DAD(CH_FIFO) = NW_BASE;
+  NDMA_WCNT(CH_FIFO) = BAND_WORDS;
+  NDMA_BCNT(CH_FIFO) = 0;
+  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(4);
+  for (i = 0; i < 200000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
+  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
+    NDMA_CNT(CH_FIFO) = 0;
+    return 0;
+  }
+  NDMA_SAD(CH_FIFO) = NW_BASE + at * 4;
+  NDMA_DAD(CH_FIFO) = DSCM_PHYS(check);
+  NDMA_WCNT(CH_FIFO) = 8;
+  NDMA_BCNT(CH_FIFO) = 0;
+  dscm_dc_invalidate(check, sizeof(check));
+  NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x10) | NDMA_PHYS(3);
+  for (i = 0; i < 10000 && (NDMA_CNT(CH_FIFO) & NDMA_ON); i++) {}
+  if (NDMA_CNT(CH_FIFO) & NDMA_ON) {
+    NDMA_CNT(CH_FIFO) = 0;
+    return 0;
+  }
+  dscm_dc_invalidate(check, sizeof(check));
+  for (i = 0; i < 8; i++)
+    if (check[i] != words[at + i])
+      return 0;
+  return 1;
+}
+
+/* After render(): the band goes into the NWRAM window when it's free and the
+ * copy reads back right, else the FIFO is fed from main RAM. */
+static void choose_source(void)
+{
+  g_src = DSCM_PHYS(g_band);
+  if (g_nwram && copy_to_nwram())
+    g_src = NW_BASE;
+  g_stats.nwram = g_src == NW_BASE;
+}
+
 /* Our channels off and mode 1 back, as the wrapper does: for when the wrapper
  * can't run (the vector was changed under us) or a band is undone at once. */
 static void stop_channels(void)
@@ -703,6 +808,9 @@ static void arm(void)
     SKIP(skip_display, 2);                     /* DISPCNT changed since the table: next wake */
     goto out;
   }
+  /* the FIFO full, so it holds exactly g_fifo_words when the band starts */
+  if (g_mode >= DSS_DISPLAY_ON)
+    fifo_fill();
   /* Out of this line's H-Blank (bounded), so its H-Blank trigger is still to
    * come and the table's first word lands at the end of this line. */
   for (i = 0; i < 256 && (DISPSTAT & 0x02); i++) {}
@@ -740,11 +848,13 @@ static void arm(void)
     if (g_mode >= DSS_DISPLAY_ON) {
       /* NDMA2: the band's rows (and the margin) into the display FIFO; mode 1
        * lines don't drain it, so it is ready when the band's first line comes.
-       * While it slides, the band's lower rows show: it rises from the edge. */
+       * While it slides, the band's lower rows show: it rises from the edge.
+       * The words already in the FIFO (edge colour) come out first: the feed
+       * starts that many words into the first row, so every row lines up. */
       NDMA_CNT(CH_FIFO) = 0;
-      NDMA_SAD(CH_FIFO) = DSCM_PHYS(g_band + (g_rows - rows) * 256);
+      NDMA_SAD(CH_FIFO) = g_src + (uint32_t)(g_rows - rows) * 512 + g_fifo_words * 4u;
       NDMA_DAD(CH_FIFO) = MMEM_FIFO;
-      NDMA_TCNT(CH_FIFO) = (uint32_t)(rows + MARGIN) * 128;
+      NDMA_TCNT(CH_FIFO) = (uint32_t)(rows + MARGIN) * 128 - g_fifo_words;
       NDMA_WCNT(CH_FIFO) = 4;
       NDMA_BCNT(CH_FIFO) = 0;
       NDMA_CNT(CH_FIFO) = NDMA_ON | NDMA_START(0x09) | NDMA_PHYS(2) | NDMA_DFIX;
@@ -828,6 +938,7 @@ static void tick(uint32_t frame)
     if (g_armed)
       return;                                  /* the last pop-up's band is still armed */
     render();
+    choose_source();
     g_cur.phase = P_IN;
     g_cur.step = 0;
     g_cur.waited_run = 0;
@@ -878,6 +989,25 @@ void dscm_popup_init(void)
     g_widths[g] = w ? (uint8_t)(w + 1) : 4;
   }
   g_screen_last = POWCNT1 & POWCNT1_TOP;
+  {
+    /* The NWRAM window is free above nds-bootstrap's copy of the game's
+     * FNT/FAT (its size as the card engine takes it, from the game's header,
+     * which the game's boot left at 0x027FFE00). */
+    const volatile uint8_t* h = (const volatile uint8_t*)(uintptr_t)POPUP_NDS_HEADER;
+#define HDR32(o) ((uint32_t)h[o] | (uint32_t)h[(o) + 1] << 8 | (uint32_t)h[(o) + 2] << 16 | (uint32_t)h[(o) + 3] << 24)
+    const uint32_t fnt_off = HDR32(0x40), fat_off = HDR32(0x48), fat_size = HDR32(0x4C);
+#undef HDR32
+    g_nwram = fat_off >= fnt_off && fat_off - fnt_off <= NW_BASE - NW_FNTFAT
+              && fat_size <= NW_BASE - NW_FNTFAT - (fat_off - fnt_off);
+  }
+  /* How many words the display FIFO holds: it is empty now (nothing has fed
+   * it), so the blocks it takes until full. Left full of the edge colour. */
+  {
+    const uint32_t words = fifo_fill();
+    g_fifo_words = (uint16_t)(words <= 64 ? words : 0);
+  }
+  g_src = DSCM_PHYS(g_band);
+  g_stats.fifo_words = g_fifo_words;
 }
 
 void dscm_popup_set_mode(uint8_t mode)

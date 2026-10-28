@@ -262,6 +262,9 @@ typedef struct __attribute__((packed)) {
   uint32_t skip_vector;    /* the IRQ vector or the high-vector bit */
   uint32_t skip_screen;    /* the main engine changed screens recently */
   uint32_t vector_lost;    /* the IRQ vector changed under an armed band (a soft reset, or the game) */
-} dss_display_status_t;    /* 60; the skips count frames, once per reason */
+  uint16_t fifo_words;     /* the display FIFO's depth, measured at start (the band's feed starts that far in) */
+  uint8_t  nwram;          /* the last band was fed from shared WRAM (else main RAM) */
+  uint8_t  reserved3;
+} dss_display_status_t;    /* 64; the skips count frames, once per reason */
 
 #endif
