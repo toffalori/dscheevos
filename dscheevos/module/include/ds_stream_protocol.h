@@ -27,6 +27,7 @@
 #define DSS_T_PEEK_REPLY    0x03
 #define DSS_T_STATUS        0x04
 #define DSS_T_POPUP_STATE   0x05   /* what became of a POPUP (dss_popup_state_t) */
+#define DSS_T_CODE          0x06   /* a piece of the game's IRQ dispatcher, once a game (dss_code_t) */
 /* phone -> console */
 #define DSS_T_TABLE         0x81
 #define DSS_T_CHAIN         0x82
@@ -71,6 +72,7 @@
 #define DSS_DISPLAY_NOOP    2            /* also the DISPCNT writer, with the game's own value on every line */
 #define DSS_DISPLAY_ON      3            /* pop-ups on screen */
 #define DSS_DISPLAY_ON_REARM 4           /* test: on, and armed again in a frame an IRQ ended the band early */
+#define DSS_DISPLAY_ON_STRICT 5          /* on, but every IRQ ends the band (no IPC interrupt passes) */
 
 /* DSS_T_CUE body[0]: what the phone unlocked, so the console can blink its LED */
 #define DSS_CUE_UNLOCK      0
@@ -271,6 +273,23 @@ typedef struct __attribute__((packed)) {
   uint32_t wake_late;      /* no band: the game first idled during the band's lines */
   uint32_t wake_vblank;    /* no band: the game idled only in VBlank */
   uint32_t wake_none;      /* no band: the game never idled in the frame */
-} dss_display_status_t;    /* 84; the skips count frames, once per reason */
+  /* the IPC receive-FIFO interrupt with the band up (start.s dscm_irq_wrapper) */
+  uint32_t irq_passed;     /* its handler ran and the band went on */
+  uint32_t irq_woke;       /* its handler woke a thread or set a check flag: the band ended */
+  uint8_t  pass_lost;      /* handlers that never came back to the wrapper (saturates; passing then stops for the game) */
+  uint8_t  reserved6;
+  uint8_t  pass_on;        /* the interrupt may pass now */
+  uint8_t  dispatcher;     /* the game's IRQ dispatcher at the last arming: bits 0-3 its NitroSDK variant (1 V1,
+                              2 V2, 0 not recognised), 0x10 its ThreadSwitch from SDK 3.x/4.x, 0x20 from SDK 2.0
+                              (passing needs one of those two) */
+} dss_display_status_t;    /* 96; the skips count frames, once per reason */
+
+/* DSS_T_CODE: 48 bytes of the game's IRQ dispatcher code, sent once a game
+ * (the dispatcher and OS_IrqHandler_ThreadSwitch), so an unrecognised one
+ * can be looked at from the phone's log. */
+typedef struct __attribute__((packed)) {
+  uint32_t address;
+  uint8_t  bytes[48];
+} dss_code_t;              /* 52 */
 
 #endif

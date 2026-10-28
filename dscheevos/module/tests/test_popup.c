@@ -16,10 +16,27 @@ static volatile uint32_t g_vector;
 #define POPUP_HOST_VECTOR (&g_vector)
 static uint8_t g_header[0x200];              /* the game's header: no FNT/FAT */
 #define POPUP_NDS_HEADER ((uintptr_t)g_header)
+/* the game's ITCM (its IRQ dispatcher) and main RAM (its threads) */
+static uint32_t g_itcm[0x2000 / 4];
+static uint8_t g_ram[0x00800000];
+static uintptr_t host_code(uint32_t a)
+{
+  static uint32_t junk;
+  if (a - 0x01FF8000u < sizeof(g_itcm))
+    return (uintptr_t)g_itcm + (a - 0x01FF8000u);
+  if (a - 0x02000000u < sizeof(g_ram))
+    return (uintptr_t)(g_ram + (a - 0x02000000u));
+  printf("FAIL: game read at %08x\n", a);
+  exit(1);
+  return (uintptr_t)&junk;
+}
+#define POPUP_CODE(a) host_code(a)
 
 /* start.s stand-ins */
 void dscm_irq_wrapper(void) {}
 volatile uint32_t dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs;
+volatile uint32_t dscm_wrap_pass, dscm_wrap_passes, dscm_wrap_woke, dscm_wrap_open;
+volatile uint32_t dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake;
 uint32_t dscm_cp15_control(void) { return 1u << 13 | 1u << 16; }   /* high vectors, DTCM on */
 uint32_t dscm_dtcm_base(void) { return 0x027C0000u; }
 uint32_t dscm_irq_off(void) { return 0; }
@@ -30,9 +47,16 @@ void dscm_dc_invalidate(const void* addr, uint32_t len) { (void)addr; (void)len;
 /* stream.c stand-in: the states the phone would get */
 static uint8_t g_sent_states[64];
 static int g_sent_count;
+static uint32_t g_code_sent[8];
+static int g_code_count;
 void dscm_stream_send(uint8_t type, const void* body, uint16_t len)
 {
   const uint8_t* b = body;
+  if (type == 0x06 && len == 52) {             /* a piece of the dispatcher's code */
+    if (g_code_count < 8)
+      memcpy(&g_code_sent[g_code_count++], b, 4);
+    return;
+  }
   if (type != 0x05 || len != 12) {
     printf("FAIL: sent type %02x len %u\n", type, len);
     exit(1);
@@ -48,6 +72,44 @@ static uint16_t g_codepoints[256];
 const dsd_font_t dsd_font_latin = { g_glyphs, g_codepoints };
 
 #include "../src/popup.c"
+
+/* A NitroSDK V1 dispatcher at 0x01FF8000 (the census's signature, with our
+ * own literals) and a ThreadSwitch shaped like SDK 3.x/4.x's after it
+ * (OSi_IrqThreadQueue at T_QUEUE, OSi_ThreadInfo at T_INFO), or like SDK
+ * 2.0's (its IRQ wake bits at T_WAKE, in the DTCM). */
+#define T_QUEUE  0x02100000u
+#define T_INFO   0x02100100u
+#define T_WAKE   0x027C0100u
+#define RAM32(a) (*(uint32_t*)(g_ram + ((a) - 0x02000000u)))
+static void fake_dispatcher(int sdk2)
+{
+  uint32_t* sw = g_itcm + 0x58 / 4;
+  uint32_t i;
+  memset(g_itcm, 0, sizeof(g_itcm));
+  memcpy(g_itcm, k_disp_v1, sizeof(k_disp_v1));
+  g_itcm[20] = sdk2 ? 0x02099FE0u : 0x027C0000u;   /* OS_IRQTable: main RAM (SDK 2.0) or the DTCM's start */
+  g_itcm[21] = 0x01FF8058u;    /* OS_IrqHandler_ThreadSwitch */
+  if (sdk2) {
+    memcpy(sw, k_switch2, sizeof(k_switch2));
+    sw[0] |= 0x100 - 0 - 8;    /* ldr ip, =wake bits, at sw + 0x100 */
+    sw[6] |= 0x104 - 6 * 4 - 8;    /* ldr ip, =info twice, at sw + 0x104 */
+    sw[18] |= 0x104 - 18 * 4 - 8;
+    sw[0x100 / 4] = T_WAKE;
+  } else {
+    memcpy(sw, k_switch3, sizeof(k_switch3));
+    sw[6] |= 0x64;             /* str r2, [ip, #0x64]: state */
+    sw[7] |= 0x78;             /* the queue field, link.prev, link.next */
+    sw[8] |= 0x7C;
+    sw[9] |= 0x80;
+    sw[10] |= 0x80;
+    for (i = 0; i < 23; i++)   /* ldr ip, =queue / =info: literals at sw + 0x100 and 0x104 */
+      if (i == 0 || i == 14 || i == 17 || i == 20)
+        sw[i] |= (i == 0 || i == 14 ? 0x100 : 0x104) - i * 4 - 8;
+    sw[0x100 / 4] = T_QUEUE;
+  }
+  sw[0x104 / 4] = T_INFO;
+  RAM32(g_itcm[20] + 18 * 4) = 0x01FF8200u;   /* OS_IRQTable[18]: a handler in ITCM */
+}
 
 static int lz10(const char* path, uint8_t* out, int max)
 {
@@ -148,6 +210,19 @@ static void frame(void)
   }
 }
 
+/* The VBlank ends an armed band (the wrapper's part), and the next idle pass sees it. */
+static void end_band(void)
+{
+  if (g_vector == WRAPPER) {
+    g_vector = dscm_wrap_orig;
+    dscm_wrap_hits++;
+    dscm_wrap_line = 192;
+    NDMA_CNT(2) = 0;
+    NDMA_CNT(3) = 0;
+  }
+  dscm_popup_idle(++t_frame);
+}
+
 /* One frame the game idles only at line vc: too late for the band, or an IRQ is due. */
 static void idle_only(uint16_t vc)
 {
@@ -202,6 +277,7 @@ int main(int argc, char** argv)
   DISPSTAT = 0x08;             /* VBlank IRQ on */
   POWCNT1 = 0x8203;            /* engine A on top */
   g_vector = 0x01FF8000u;      /* the game's handler, in ITCM */
+  fake_dispatcher(0);
   for (i = 0; i < 40; i++)
     frame();                   /* the screen has stayed put */
 
@@ -213,6 +289,14 @@ int main(int argc, char** argv)
   frames = run(path, TOAST_ROWS, 1);
   expect_states(life, 3);
   printf("toast: %d frames, %u arms, %u shown\n", frames, g_stats.arms, g_stats.frames_shown);
+  /* the dispatcher was recognised, its addresses handed to the wrapper, its code sent once */
+  if (g_disp.variant != (DISP_V1 | DISP_SDK3) || dscm_wrap_pass != 1 || dscm_wrap_table != 0x027C0000u
+      || dscm_wrap_switch != 0x01FF8058u || dscm_wrap_info != T_INFO || dscm_wrap_wake != 0 || g_code_count != 6
+      || g_code_sent[0] != 0x01FF8000u || g_code_sent[1] != 0x01FF8030u || g_code_sent[2] != 0x01FF8058u) {
+    printf("FAIL: dispatcher: variant %02x pass %u table %08x switch %08x info %08x wake %08x, %d code chunks\n",
+           g_disp.variant, dscm_wrap_pass, dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake, g_code_count);
+    return 1;
+  }
 
   dscm_popup_on_popup(g_pkt, popup_packet(2, DSS_POPUP_UNLOCK, DSS_POPUP_SMALL, DSS_POPUP_POS_RIGHT, 0, "",
                                           "Bowser's Sub, a very long title that will not fit", "", "25 pts"));
@@ -291,6 +375,77 @@ int main(int argc, char** argv)
   g_standdown = 0;
   g_sent_count = 0;
   g_cur.phase = P_FREE;
+
+  /* the wrapper let an IPC interrupt through and the game's handler never came
+   * back to it: the band is stopped, it isn't a vector loss, and no interrupt
+   * passes again */
+  {
+    const uint32_t lost = g_stats.vector_lost;
+    g_vector = 0x01FF8000u;    /* the dispatcher again, after the test above changed it */
+    dscm_popup_on_popup(g_pkt, popup_packet(7, DSS_POPUP_TEST, DSS_POPUP_TOAST, 0, 0, "", "x", "", ""));
+    REG16(0x04000006) = 154;
+    for (i = 0; i < 20 && g_vector != WRAPPER; i++)
+      dscm_popup_idle(++t_frame);
+    if (g_vector != WRAPPER || dscm_wrap_pass != 1) { printf("FAIL: not armed to pass\n"); return 1; }
+    g_vector = dscm_wrap_orig;
+    dscm_wrap_open = 1;
+    dscm_popup_idle(t_frame);
+    if (!g_pass_off || g_stats.pass_lost != 1 || g_stats.vector_lost != lost || dscm_wrap_open || g_armed) {
+      printf("FAIL: lost pass not handled\n");
+      return 1;
+    }
+    for (i = 0; i < 20 && g_vector != WRAPPER; i++)
+      dscm_popup_idle(++t_frame);
+    if (g_vector != WRAPPER || dscm_wrap_pass != 0) { printf("FAIL: passing after a lost pass\n"); return 1; }
+    g_cur.phase = P_FREE;
+    g_sent_count = 0;
+    g_pass_off = 0;
+    end_band();
+  }
+
+  /* a handler that isn't NitroSDK's known dispatcher: no passing; one whose
+   * ThreadSwitch differs: recognised, but no passing */
+  g_itcm[3] ^= 1;
+  if (dispatcher_known(0x01FF8000u) || g_disp.variant) { printf("FAIL: a changed dispatcher was recognised\n"); return 1; }
+  g_itcm[3] ^= 1;
+  g_itcm[0x58 / 4 + 15] ^= 4;
+  if (dispatcher_known(0x01FF8000u) || g_disp.variant != DISP_V1) { printf("FAIL: a changed ThreadSwitch was taken\n"); return 1; }
+  g_itcm[0x58 / 4 + 15] ^= 4;
+  g_itcm[0x58 / 4 + 8] += 4;   /* link.prev not right before link.next */
+  if (dispatcher_known(0x01FF8000u)) { printf("FAIL: odd OSThread offsets were taken\n"); return 1; }
+  g_itcm[0x58 / 4 + 8] -= 4;
+  g_itcm[0x58 / 4 + 20] += 4;  /* the two loads of OSi_ThreadInfo disagree */
+  if (dispatcher_known(0x01FF8000u)) { printf("FAIL: disagreeing literals were taken\n"); return 1; }
+  g_itcm[0x58 / 4 + 20] -= 4;
+  if (!dispatcher_known(0x01FF8000u) || !pass_ready()) { printf("FAIL: the dispatcher isn't recognised again\n"); return 1; }
+  RAM32(0x027C0000u + 18 * 4) = 0x04000000u;   /* the IPC handler not in code memory */
+  if (pass_ready()) { printf("FAIL: an odd IPC handler taken\n"); return 1; }
+  RAM32(0x027C0000u + 18 * 4) = 0x01FF8200u;
+
+  /* NitroSDK 2.0 (Super Mario 64 DS): its table in main RAM, its ThreadSwitch
+   * with IRQ wake bits; armed to pass with those handed to the wrapper */
+  fake_dispatcher(1);
+  if (!dispatcher_known(0x01FF8000u) || g_disp.variant != (DISP_V1 | DISP_SDK2) || g_disp.info != T_INFO
+      || g_disp.wake != T_WAKE || g_disp.table != 0x02099FE0u || !pass_ready()) {
+    printf("FAIL: SDK 2.0: variant %02x info %08x wake %08x table %08x\n", g_disp.variant, g_disp.info, g_disp.wake, g_disp.table);
+    return 1;
+  }
+  dscm_popup_on_popup(g_pkt, popup_packet(8, DSS_POPUP_TEST, DSS_POPUP_TOAST, 0, 0, "", "x", "", ""));
+  REG16(0x04000006) = 154;
+  for (i = 0; i < 20 && g_vector != WRAPPER; i++)
+    dscm_popup_idle(++t_frame);
+  if (g_vector != WRAPPER || dscm_wrap_pass != 1 || dscm_wrap_wake != T_WAKE || dscm_wrap_info != T_INFO
+      || dscm_wrap_table != 0x02099FE0u || g_stats.dispatcher != 0) {
+    /* (the status's copy is taken at dscm_popup_status) */
+    if (!(g_vector == WRAPPER && dscm_wrap_pass == 1 && dscm_wrap_wake == T_WAKE)) {
+      printf("FAIL: SDK 2.0 not armed to pass (pass %u, wake %08x)\n", dscm_wrap_pass, dscm_wrap_wake);
+      return 1;
+    }
+  }
+  g_cur.phase = P_FREE;
+  g_sent_count = 0;
+  end_band();
+  fake_dispatcher(0);
 
   /* fuzz: random, truncated and mutated packets must never write out of bounds */
   srand(1);

@@ -18,9 +18,13 @@
  * game thread is blocked, so no game code runs until an IRQ. The first IRQ
  * goes through dscm_irq_wrapper (start.s), put on the BIOS IRQ vector at
  * arming: it stops both channels, puts mode 1 back, takes itself off the
- * vector, and only then runs the game's handler. So the game never sees mode
- * 3 and never loses a DISPCNT write. A band an IRQ ends early is re-armed at
- * the next idle halt if there is still time in the frame.
+ * vector, and only then runs the game's handler. The IPC receive-FIFO
+ * interrupt alone (the ARM7's messages, about one a frame) is let through
+ * instead, in games whose NitroSDK dispatcher we recognise: the wrapper
+ * calls its handler with the band up, and the band goes on if the handler
+ * woke no game thread (NitroSDK then wakes OS_WaitIrq's waiters, which look
+ * and sleep again; collect() checks they did). So no game thread ever sees
+ * mode 3 or loses a DISPCNT write.
  *
  * Everything here runs in the module's idle time; nothing runs in the game's
  * interrupts except the wrapper. Packets from the network are checked against
@@ -42,6 +46,8 @@ void dscm_stream_send(uint8_t type, const void* body, uint16_t len);
 /* start.s */
 extern void dscm_irq_wrapper(void);
 extern volatile uint32_t dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs;
+extern volatile uint32_t dscm_wrap_pass, dscm_wrap_passes, dscm_wrap_woke, dscm_wrap_open;
+extern volatile uint32_t dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake;
 extern uint32_t dscm_cp15_control(void);
 extern uint32_t dscm_dtcm_base(void);
 extern uint32_t dscm_irq_off(void);
@@ -56,6 +62,9 @@ extern void dscm_dc_invalidate(const void* addr, uint32_t len);
 #endif
 #ifndef POPUP_NDS_HEADER
 #define POPUP_NDS_HEADER 0x027FFE00u           /* the game's header, where its boot left it */
+#endif
+#ifndef POPUP_CODE
+#define POPUP_CODE(a) (a)                      /* the game's code and data, read where they are */
 #endif
 #define REG8(a)  (*(volatile uint8_t*)POPUP_IO(a))
 #define REG16(a) (*(volatile uint16_t*)POPUP_IO(a))
@@ -171,6 +180,7 @@ uint8_t dscm_popup_active;
 static uint8_t  g_mode;                        /* DSS_DISPLAY_*, from the phone (off until it says) */
 static uint8_t  g_standdown;                   /* DSS_POPUP_WHY_*: off for the rest of the game */
 static uint8_t  g_armed;                       /* the wrapper's entry for the last arming is due */
+static uint8_t  g_pass_off;                    /* passing stopped for the game (pass_lost) */
 static uint32_t g_armed_hits;                  /* dscm_wrap_hits at that arming */
 static uint16_t g_armed_first;                 /* its band's first line */
 static uint32_t g_shown_seen, g_cut_seen;      /* counts at the last frame tick */
@@ -628,6 +638,167 @@ static volatile uint32_t* irq_vector(void)
 #endif
 }
 
+/* ---- the game's IRQ dispatcher, for letting the IPC interrupt pass ---- */
+
+/* NitroSDK's OS_IrqHandler as the display census found it in 43 of 45 games
+ * (docs/display-research/survey.md section 5), the IRQ table and
+ * OS_IrqHandler_ThreadSwitch in the two literal words after it: V1 (release
+ * builds, conditional returns) and V2 (2007-2009 titles, branch pairs). Both
+ * do the same: IME and IE & IF checks, the lowest pending bit acknowledged,
+ * its table entry called with lr = ThreadSwitch, their own return pushed. */
+static const uint32_t k_disp_v1[20] = {
+  0xE92D4000, 0xE3A0C301, 0xE28CCE21, 0xE51C1008, 0xE3510000, 0x08BD8000, 0xE89C0006, 0xE0111002,
+  0x08BD8000, 0xE3A03102, 0xE16F0F11, 0xE1D11033, 0x1AFFFFFC, 0xE1A01033, 0xE58C1004, 0xE270001F,
+  0xE59F1008, 0xE7910100, 0xE59FE004, 0xE12FFF10,
+};
+static const uint32_t k_disp_v2[24] = {
+  0xE92D4000, 0xE3A0C301, 0xE28CCE21, 0xE51C1008, 0xE3510000, 0x0A000000, 0xEA000000, 0xE8BD8000,
+  0xE89C0006, 0xE0111002, 0x0A000000, 0xEA000000, 0xE8BD8000, 0xE3A03102, 0xE16F0F11, 0xE1D11033,
+  0x1AFFFFFC, 0xE1A01033, 0xE58C1004, 0xE270001F, 0xE59F1008, 0xE7910100, 0xE59FE004, 0xE12FFF10,
+};
+
+static struct {
+  uint32_t seen;                               /* the vector the code dump was queued for */
+  uint8_t  variant;                            /* DISP_*: what dispatcher_known() found last */
+  uint8_t  dump_left;                          /* DSS_T_CODE chunks still to send */
+  uint32_t table, sw, info, wake;
+} g_disp;
+#define DISP_V1      0x01                      /* the dispatcher, either variant */
+#define DISP_V2      0x02
+#define DISP_SDK3    0x10                      /* its ThreadSwitch: NitroSDK 3.x/4.x */
+#define DISP_SDK2    0x20                      /* NitroSDK 2.0 */
+
+#define CODE32(a) (*(const volatile uint32_t*)POPUP_CODE(a))
+
+static int in_main_ram(uint32_t a) { return a - 0x02000000u < 0x01000000u; }
+static int in_itcm(uint32_t a) { return a - 0x01000000u < 0x01000000u; }
+static int in_dtcm(uint32_t a, uint32_t room) { return a - dscm_dtcm_base() < 0x4000u - room; }
+
+/* OS_IrqHandler_ThreadSwitch's start up to its isNeedRescheduling test, word
+ * for word, the masked words being ldr ip,=X (literal offsets) and OSThread
+ * field offsets.
+ * NitroSDK 3.x (the pokediamond decomp) and 4.x (Pokemon HG, Platinum,
+ * Black): OSi_IrqThreadQueue's threads woken (state = READY, queue and link
+ * cleared), the queue emptied, isNeedRescheduling set; then the test. */
+static const uint32_t k_switch3[23] = {
+  0xE59FC000, 0xE3A03000, 0xE59CC000, 0xE3A02001, 0xE35C0000, 0x0A00000D, 0xE58C2000, 0xE58C3000,
+  0xE58C3000, 0xE59C0000, 0xE58C3000, 0xE1A0C000, 0xE35C0000, 0x1AFFFFF7, 0xE59FC000, 0xE58C3000,
+  0xE58C3004, 0xE59FC000, 0xE3A01001, 0xE1CC10B0, 0xE59FC000, 0xE1DC10B0, 0xE3510000,
+};
+#define K_SWITCH3_MASKED ((1u << 0) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 14) | (1u << 17) | (1u << 20))
+/* NitroSDK 2.0 (Super Mario 64 DS): a halfword of IRQ wake bits read and
+ * cleared; if any, isNeedRescheduling set and every thread waiting on one of
+ * those IRQs made READY; then the test. */
+static const uint32_t k_switch2[21] = {
+  0xE59FC000, 0xE1DC30B0, 0xE3A00000, 0xE3530000, 0x0A00000C, 0xE1CC00B0, 0xE59FC000, 0xE3A01001,
+  0xE1CC10B0, 0xE59CC00C, 0xE3A02001, 0xE35C0000, 0x0A000004, 0xE59C006C, 0xE1130011, 0x158C2064,
+  0xE59CC068, 0xEAFFFFF8, 0xE59FC000, 0xE1DC10B0, 0xE3510000,
+};
+#define K_SWITCH2_MASKED ((1u << 0) | (1u << 6) | (1u << 18))
+
+/* The ldr ip,=X literal of the word i at sw. */
+static uint32_t switch_literal(uint32_t sw, uint32_t i)
+{
+  return CODE32(sw + i * 4 + 8 + (CODE32(sw + i * 4) & 0xFFF));
+}
+
+static int switch_matches(uint32_t sw, const uint32_t* sig, uint32_t len, uint32_t masked)
+{
+  uint32_t i;
+  for (i = 0; i < len; i++)
+    if ((CODE32(sw + i * 4) & ((masked >> i) & 1 ? 0xFFFFF000u : 0xFFFFFFFFu)) != sig[i])
+      return 0;
+  return 1;
+}
+
+/* ThreadSwitch at sw: DISP_SDK3 or DISP_SDK2 with g_disp's info (and, SDK 2.0,
+ * wake) filled in, every literal loaded twice agreeing; 0 if unknown. */
+static uint32_t find_thread_switch(uint32_t sw)
+{
+  uint32_t q;
+  if (!in_itcm(sw) || (sw & 3))
+    return 0;
+  if (switch_matches(sw, k_switch3, 23, K_SWITCH3_MASKED)) {
+    const uint32_t next = CODE32(sw + 9 * 4) & 0xFFF;
+    q = switch_literal(sw, 0);
+    g_disp.info = switch_literal(sw, 17);
+    g_disp.wake = 0;
+    return q == switch_literal(sw, 14) && g_disp.info == switch_literal(sw, 20) && q != g_disp.info
+           && (CODE32(sw + 10 * 4) & 0xFFF) == next && next >= 8
+           && (CODE32(sw + 7 * 4) & 0xFFF) == next - 8 && (CODE32(sw + 8 * 4) & 0xFFF) == next - 4
+           && in_main_ram(g_disp.info) && !(g_disp.info & 3)
+           ? DISP_SDK3 : 0;
+  }
+  if (switch_matches(sw, k_switch2, 21, K_SWITCH2_MASKED)) {
+    g_disp.info = switch_literal(sw, 6);
+    g_disp.wake = switch_literal(sw, 0);
+    return g_disp.info == switch_literal(sw, 18) && in_main_ram(g_disp.info) && !(g_disp.info & 3)
+           && (in_dtcm(g_disp.wake, 2) || in_main_ram(g_disp.wake)) && !(g_disp.wake & 1)
+           && g_disp.wake != g_disp.info
+           ? DISP_SDK2 : 0;
+  }
+  return 0;
+}
+
+/* Whether the IRQ vector holds a dispatcher the wrapper can stand in for,
+ * checked word for word at every arming (g_disp.variant says what matched);
+ * the code dump to the phone queued once per vector value. */
+static int dispatcher_known(uint32_t cur)
+{
+  uint32_t n, i;
+  if (cur != g_disp.seen) {
+    g_disp.seen = cur;
+    g_disp.dump_left = 6;
+  }
+  g_disp.variant = 0;
+  g_disp.sw = 0;
+  if (!in_itcm(cur) || (cur & 3))
+    return 0;
+  for (n = 1; n <= 2; n++) {
+    const uint32_t* sig = n == 1 ? k_disp_v1 : k_disp_v2;
+    const uint32_t len = n == 1 ? 20 : 24;
+    for (i = 0; i < len && CODE32(cur + i * 4) == sig[i]; i++) {}
+    if (i < len)
+      continue;
+    g_disp.variant = (uint8_t)n;
+    g_disp.table = CODE32(cur + len * 4);
+    g_disp.sw = CODE32(cur + len * 4 + 4);
+    if ((!in_dtcm(g_disp.table, 22 * 4) && !in_main_ram(g_disp.table)) || (g_disp.table & 3))
+      return 0;
+    g_disp.variant |= (uint8_t)find_thread_switch(g_disp.sw);
+    return (g_disp.variant & (DISP_SDK3 | DISP_SDK2)) != 0;
+  }
+  return 0;
+}
+
+/* With the dispatcher known: the IPC receive-FIFO handler where code lives
+ * (ARM or Thumb: the wrapper calls it with bx). */
+static int pass_ready(void)
+{
+  const uint32_t handler = CODE32(g_disp.table + 18 * 4);
+  return in_itcm(handler) || in_main_ram(handler);
+}
+
+/* One DSS_T_CODE chunk a call while some are due: the dispatcher's first 96
+ * bytes, then ThreadSwitch's first 192 (or more of the dispatcher, when it
+ * wasn't recognised). */
+static void send_code(void)
+{
+  dss_code_t c;
+  uint32_t k, base;
+  if (!g_disp.dump_left || !g_disp.seen || !in_itcm(g_disp.seen))
+    return;
+  k = 6u - g_disp.dump_left;
+  base = k < 2 || !g_disp.sw || !in_itcm(g_disp.sw) ? g_disp.seen + k * 48 : g_disp.sw + (k - 2) * 48;
+  c.address = base;
+  for (uint32_t i = 0; i < 48; i += 4) {
+    const uint32_t w = CODE32(base + i);
+    memcpy(c.bytes + i, &w, 4);
+  }
+  dscm_stream_send(DSS_T_CODE, &c, sizeof(c));
+  g_disp.dump_left--;
+}
+
 /* The result of the last arming, once the wrapper has run for it. */
 static void collect(void)
 {
@@ -639,7 +810,20 @@ static void collect(void)
   if (dscm_wrap_hits == g_armed_hits) {
     if (*irq_vector() == WRAPPER) {
       dscm_irq_restore(cpsr);
-      return;                                  /* no IRQ yet */
+      return;                                  /* no IRQ yet, or only IPC ones let through */
+    }
+    if (dscm_wrap_open) {
+      /* The wrapper called the game's handler for an IPC interrupt and it
+       * never came back (it returned to the BIOS some other way): the band
+       * ran on unguarded. Stop it, and let no interrupt through again. */
+      stop_channels();
+      dscm_wrap_open = 0;
+      dscm_irq_restore(cpsr);
+      g_armed = 0;
+      g_pass_off = 1;
+      if (g_stats.pass_lost < 0xFF)
+        g_stats.pass_lost++;
+      return;
     }
     /* The vector was changed while we were on it (nds-bootstrap's soft reset
      * clears it, or the game set another handler): nothing will stop the
@@ -690,6 +874,14 @@ static int dma_busy(void)
   return 0;
 }
 
+/* The IPC interrupt may pass the wrapper: with the DISPCNT writer running (its
+ * check after the handler), unless the phone asked for strict or passing
+ * went wrong once in this game. */
+static uint32_t pass_allowed(void)
+{
+  return !g_pass_off && g_mode >= DSS_DISPLAY_NOOP && g_mode != DSS_DISPLAY_ON_STRICT;
+}
+
 /* A reason a frame's band was skipped, counted once per frame however many
  * idle wakes it held up (some games wake 20-40 times a frame). */
 #define SKIP(field, bit) do { if (!(g_skips_seen & (bit))) { g_skips_seen |= (bit); g_stats.field++; } } while (0)
@@ -702,7 +894,7 @@ static void arm(void)
   const int rows = visible_rows();
   const uint32_t first = (uint32_t)(LAST_LINE + 1 - rows);
   volatile uint32_t* vec;
-  uint32_t cpsr, vc, d, cur, l, ie, ds, ctl;
+  uint32_t cpsr, vc, d, cur, l, ie, ds, ctl, pass;
   int i;
 
   if (rows <= 0 || g_armed || g_standdown || g_mode == DSS_DISPLAY_OFF)
@@ -710,7 +902,7 @@ static void arm(void)
   /* An IRQ ended this frame's band before its first line: the display FIFO
    * may still hold words the first arming fed it, which a second one in the
    * same frame would show first (proven on hardware only from a new frame). */
-  if (g_mode == DSS_DISPLAY_ON && g_fifo_frame == g_frame)   /* DSS_DISPLAY_ON_REARM tries it */
+  if (g_mode != DSS_DISPLAY_ON_REARM && g_fifo_frame == g_frame)   /* DSS_DISPLAY_ON_REARM tries it */
     return;
   /* The per-line DISPCNT table, with IRQs still on (most of a line through
    * the uncached mirror): rebuilt only when the game's value, the band's
@@ -729,7 +921,8 @@ static void arm(void)
     g_table_first = (uint16_t)first;
   }
   /* Arm late, a few lines before the band's first line: an IRQ between the
-   * arming and the band ends it before it starts, and costs the frame (the
+   * arming and the band (one not let through) ends it before it starts, and
+   * costs the frame (the
    * FIFO can't be fed twice in one frame: hardware run 3 showed the second
    * feed garbled). Until then this idle thread watches the line with IRQs
    * on: a game IRQ runs as usual, and a thread it wakes takes the CPU as it
@@ -781,6 +974,8 @@ static void arm(void)
     SKIP(skip_display, 2);                     /* DISPCNT changed since the table: next wake */
     goto out;
   }
+  /* whether the IPC interrupt may pass this band (before the timed part) */
+  pass = pass_allowed() && dispatcher_known(cur) && pass_ready();
   /* Out of this line's H-Blank (bounded), so its H-Blank trigger is still to
    * come and the table's first word lands at the end of this line. */
   for (i = 0; i < 256 && (DISPSTAT & 0x02); i++) {}
@@ -835,8 +1030,16 @@ static void arm(void)
     }
   }
   dscm_wrap_orig = cur;
+  dscm_wrap_pass = pass;
+  if (pass) {
+    dscm_wrap_table = g_disp.table;
+    dscm_wrap_switch = g_disp.sw;
+    dscm_wrap_info = g_disp.info;
+    dscm_wrap_wake = g_disp.wake;
+  }
+  dscm_wrap_open = 0;
   /* the wrapper's words to RAM: a game's cache invalidate must not lose them */
-  dscm_dc_clean((const void*)&dscm_wrap_orig, 16);
+  dscm_dc_clean((const void*)&dscm_wrap_orig, 64);
   g_armed_hits = dscm_wrap_hits;
   g_armed_first = (uint16_t)first;
   g_armed = 1;
@@ -866,6 +1069,7 @@ static void tick(uint32_t frame)
   int showed;
   g_frame = frame;
   g_skips_seen = 0;
+  send_code();
   if (screen == g_screen_last) {
     if (g_screen_frames < 0xFFFF)   /* one a tick: a frame skipped between ticks may have swapped */
       g_screen_frames++;
@@ -988,7 +1192,7 @@ void dscm_popup_init(void)
 
 void dscm_popup_set_mode(uint8_t mode)
 {
-  if (mode > DSS_DISPLAY_ON_REARM)
+  if (mode > DSS_DISPLAY_ON_STRICT)
     return;
   g_mode = mode;
   g_table_mode = 0xFF;                         /* rebuild the table for the new mode */
@@ -1045,5 +1249,9 @@ void dscm_popup_rearm(void)
 void dscm_popup_status(dss_display_status_t* out)
 {
   g_stats.mode = g_mode;
+  g_stats.irq_passed = dscm_wrap_passes;
+  g_stats.irq_woke = dscm_wrap_woke;
+  g_stats.pass_on = (uint8_t)(pass_allowed() && (g_disp.variant & (DISP_SDK3 | DISP_SDK2)));
+  g_stats.dispatcher = g_disp.variant;
   *out = g_stats;
 }

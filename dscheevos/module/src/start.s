@@ -360,10 +360,11 @@ dscm_dtcm_base:
 @ The pop-up strip's abort (popup.c, the Cheevotron streamer build; other
 @ builds don't reference it, and --gc-sections drops it). While a strip is armed, the BIOS's IRQ
 @ entry jumps here through [DTCM+0x3FFC] instead of to the game's handler; the
-@ arming put us there with IRQs masked, right before the game's halt. The first
-@ IRQ of any kind, before any game code runs:
-@  - puts the game's handler back on the vector (so this runs once per arming);
-@  - notes the line and IE & IF, for the strip's statistics;
+@ arming put us there with IRQs masked, right before the game's halt. At the
+@ first IRQ, before any game code runs, it puts the game's handler back on
+@ the vector and notes the line and IE & IF, for the strip's statistics.
+@
+@ Then, usually, the band ends here:
 @  - stops our two NDMA channels, recognised by their destinations (NDMA3
 @    writes DISPCNT from a table at each H-Blank, NDMA2 feeds the display FIFO),
 @    the DISPCNT writer first, and waits a little for a write already in flight;
@@ -371,11 +372,31 @@ dscm_dtcm_base:
 @    the arming checks for mode 1), byte 2 of DISPCNT only;
 @  - jumps to the game's handler, with r0 (DTCM + 0x4000, from the BIOS) and lr
 @    (the BIOS's return) as the BIOS left them.
-@ So no game code ever sees mode 3, and no DISPCNT write of the game's can be
-@ overwritten by a table entry. Only r1-r3 and r12 change (the BIOS saved them)
-@ and nothing goes on the stack: the game's handler finds the IRQ stack as the
-@ BIOS left it. The words after the code are its data, read and written as
-@ data through this code's own (main RAM) address, as popup.c does: one view.
+@ So no game thread ever sees mode 3, and no DISPCNT write of a game thread
+@ can be overwritten by a table entry. Only r1-r3 and r12 change (the BIOS
+@ saved them) and nothing goes on the stack: the game's handler finds the IRQ
+@ stack as the BIOS left it.
+@
+@ Passing (popup.c sets WRAP_PASS once it has recognised the game's dispatcher,
+@ NitroSDK's OS_IrqHandler, and its OS_IrqHandler_ThreadSwitch): the IPC
+@ receive-FIFO interrupt alone (the ARM7's PXI messages, about one a frame,
+@ often inside the band), inside the frame's lines, doesn't end the band. We
+@ do the dispatcher's part for it (its return on the IRQ stack, IF
+@ acknowledged, the table's handler called) and come back here, before
+@ ThreadSwitch. If the handler woke no thread (OSi_ThreadInfo.
+@ isNeedRescheduling), set no new IRQ check flag (DTCM+0x3FF8) and, in SDK 2.0,
+@ left no IRQ wake bits for ThreadSwitch (WRAP_WAKE), ThreadSwitch has nothing
+@ to do but wake OS_WaitIrq's sleepers to look at flags that didn't change:
+@ we return to the BIOS instead, as it would, and those sleepers look at the
+@ next interrupt that isn't passed (the VBlank at the latest). So with the
+@ band up only the game's IPC handler runs, never a game thread. Otherwise
+@ the band ends and ThreadSwitch runs as usual. IPC sync never passes:
+@ nds-bootstrap's in-game menu and reset run in its handler.
+@
+@ The words after the code are its data, read and written as data through
+@ this code's own (main RAM) address, as popup.c does: one view. They are
+@ cleaned to RAM before game code runs, so a game's cache invalidate can't
+@ undo them.
 	.pushsection .text.popup, "ax"
 	.arm
 	.align	2
@@ -383,23 +404,20 @@ dscm_dtcm_base:
 	.equ	WRAP_HITS, 4
 	.equ	WRAP_LINE, 8
 	.equ	WRAP_IRQS, 12
-	.global dscm_irq_wrapper
-	.type dscm_irq_wrapper, %function
-dscm_irq_wrapper:
-	adr	r3, dscm_wrap_orig          @ r3: our words (WRAP_*)
-	ldr	r1, [r3, #WRAP_ORIG]
-	str	r1, [r0, #-4]               @ the game's handler back on the vector, first
-	mov	r12, #0x04000000
-	ldrh	r2, [r12, #6]               @ VCOUNT
-	str	r2, [r3, #WRAP_LINE]
-	ldr	r2, [r12, #0x210]           @ IE
-	ldr	r1, [r12, #0x214]           @ IF
-	and	r2, r2, r1
-	str	r2, [r3, #WRAP_IRQS]
-	ldr	r2, [r3, #WRAP_HITS]
-	add	r2, r2, #1
-	str	r2, [r3, #WRAP_HITS]
-	mcr	p15, 0, r3, c7, c10, 1      @ clean the words' line: a game's cache invalidate can't undo them
+	.equ	WRAP_PASS, 16
+	.equ	WRAP_PASSES, 20
+	.equ	WRAP_WOKE, 24
+	.equ	WRAP_OPEN, 28
+	.equ	WRAP_TABLE, 32              @ second cache line: popup.c sets these with WRAP_PASS
+	.equ	WRAP_SWITCH, 36
+	.equ	WRAP_INFO, 40
+	.equ	WRAP_WAKE, 44
+	.equ	WRAP_FLAGS, 48
+	.equ	IPC_RECV, 0x40000           @ IE/IF: IPC receive FIFO not empty
+	.equ	PASS_LINES, 191             @ passing only before this line (popup.c LAST_LINE + 1)
+
+@ Our channels off and mode 1 back; r12 = 0x04000000 on entry; r1-r3, r12 change.
+	.macro	STOP_BAND
 	add	r12, r12, #0x4100           @ the NDMA registers
 	mov	r3, #0
 	ldr	r2, [r12, #0x70]            @ NDMA3CNT
@@ -435,19 +453,147 @@ dscm_irq_wrapper:
 	biceq	r2, r2, #3
 	orreq	r2, r2, #1
 	strbeq	r2, [r12, #2]
-4:	adr	r1, dscm_wrap_orig
+4:
+	.endm
+
+	.global dscm_irq_wrapper
+	.type dscm_irq_wrapper, %function
+dscm_irq_wrapper:
+	adr	r3, dscm_wrap_orig          @ r3: our words (WRAP_*)
+	ldr	r1, [r3, #WRAP_ORIG]
+	str	r1, [r0, #-4]               @ the game's handler back on the vector, first
+	mov	r12, #0x04000000
+	ldrh	r2, [r12, #6]               @ VCOUNT
+	str	r2, [r3, #WRAP_LINE]
+	ldr	r2, [r12, #0x210]           @ IE
+	ldr	r1, [r12, #0x214]           @ IF
+	and	r2, r2, r1
+	str	r2, [r3, #WRAP_IRQS]
+	ldr	r1, [r3, #WRAP_PASS]
+	cmp	r1, #0
+	beq	5f
+	cmp	r2, #IPC_RECV               @ that interrupt alone
+	bne	5f
+	ldr	r1, [r3, #WRAP_LINE]
+	cmp	r1, #PASS_LINES
+	bhs	5f
+	ldr	r1, [r12, #0x208]           @ IME: the dispatcher does nothing while it is 0
+	tst	r1, #1
+	beq	5f
+	@ the dispatcher's part: its return on the IRQ stack (ThreadSwitch pops
+	@ it), the interrupt acknowledged, the table's handler called
+	str	lr, [sp, #-4]!
+	str	r2, [r12, #0x214]           @ IF
+	ldr	r1, [r0, #-8]               @ DTCM+0x3FF8: the IRQ check flags before the handler
+	str	r1, [r3, #WRAP_FLAGS]
+	mov	r1, #1
+	str	r1, [r3, #WRAP_OPEN]
+	mcr	p15, 0, r3, c7, c10, 1      @ both lines of our words to RAM
+	add	r1, r3, #32
+	mcr	p15, 0, r1, c7, c10, 1
+	mov	r1, #0
+	mcr	p15, 0, r1, c7, c10, 4      @ and out of the write buffer
+	ldr	r1, [r3, #WRAP_TABLE]
+	ldr	r0, [r1, #18 * 4]           @ OS_IRQTable[18], called as the dispatcher does
+	adr	lr, 6f
+	bx	r0
+6:	mrs	r2, cpsr                    @ IRQs masked, whatever the handler left
+	orr	r2, r2, #0x80
+	msr	cpsr_c, r2
+	adr	r3, dscm_wrap_orig
+	mov	r2, #0
+	str	r2, [r3, #WRAP_OPEN]
+	ldr	r1, [r3, #WRAP_INFO]
+	ldrh	r1, [r1]                    @ OSi_ThreadInfo.isNeedRescheduling
+	cmp	r1, #0
+	bne	7f                          @ the handler woke a thread
+	ldr	r1, [r3, #WRAP_WAKE]        @ SDK 2.0: IRQ wake bits ThreadSwitch would act on
+	cmp	r1, #0
+	ldrhne	r1, [r1]
+	cmpne	r1, #0
+	bne	7f
+	mrc	p15, 0, r1, c9, c1, 0
+	lsr	r1, r1, #12
+	lsl	r1, r1, #12
+	add	r1, r1, #0x4000             @ r1: DTCM + 0x4000
+	ldr	r2, [r1, #-8]
+	ldr	r12, [r3, #WRAP_FLAGS]
+	bics	r2, r2, r12
+	bne	7f                          @ a new check flag: an OS_WaitIrq waiter goes on
+	mov	r12, #0x04000000
+	ldrh	r2, [r12, #6]
+	cmp	r2, #PASS_LINES
+	bhs	8f                          @ the band is over
+	add	r12, r12, #0x4100
+	ldr	r2, [r12, #0x70]            @ our DISPCNT writer still running?
+	tst	r2, #0x80000000
+	beq	8f
+	ldr	r2, [r12, #0x5C]
+	cmp	r2, #0x04000000
+	bne	8f
+	ldr	r2, [r1, #-4]
+	ldr	r12, [r3, #WRAP_ORIG]
+	cmp	r2, r12
+	bne	8f                          @ the handler changed the vector: leave it be
+	adr	r2, dscm_irq_wrapper
+	str	r2, [r1, #-4]               @ back on the vector: the band goes on
+	ldr	r2, [r3, #WRAP_PASSES]
+	add	r2, r2, #1
+	str	r2, [r3, #WRAP_PASSES]
+	mcr	p15, 0, r3, c7, c10, 1
+	ldr	pc, [sp], #4                @ back to the BIOS, as ThreadSwitch with nothing to do
+7:	ldr	r2, [r3, #WRAP_WOKE]
+	add	r2, r2, #1
+	str	r2, [r3, #WRAP_WOKE]
+8:	mov	r12, #0x04000000            @ the band ends now, then ThreadSwitch
+	ldrh	r2, [r12, #6]
+	str	r2, [r3, #WRAP_LINE]
+	ldr	r2, [r3, #WRAP_HITS]
+	add	r2, r2, #1
+	str	r2, [r3, #WRAP_HITS]
+	mcr	p15, 0, r3, c7, c10, 1
+	STOP_BAND
+	adr	r3, dscm_wrap_orig
+	ldr	pc, [r3, #WRAP_SWITCH]
+5:	ldr	r2, [r3, #WRAP_HITS]        @ the band ends now, then the game's handler
+	add	r2, r2, #1
+	str	r2, [r3, #WRAP_HITS]
+	mcr	p15, 0, r3, c7, c10, 1
+	mov	r12, #0x04000000
+	STOP_BAND
+	adr	r1, dscm_wrap_orig
 	ldr	r1, [r1, #WRAP_ORIG]
 	bx	r1
 	.global dscm_wrap_orig, dscm_wrap_hits, dscm_wrap_line, dscm_wrap_irqs
-	.balign	32                          @ one cache line for the four words
+	.global dscm_wrap_pass, dscm_wrap_passes, dscm_wrap_woke, dscm_wrap_open
+	.global dscm_wrap_table, dscm_wrap_switch, dscm_wrap_info, dscm_wrap_wake
+	.balign	32                          @ two cache lines for the words
 dscm_wrap_orig:
 	.word	0                           @ the game's IRQ handler, saved at arming
 dscm_wrap_hits:
-	.word	0                           @ entries so far (one per arming)
+	.word	0                           @ bands ended here so far (one per arming)
 dscm_wrap_line:
-	.word	0                           @ VCOUNT at the last entry
+	.word	0                           @ VCOUNT where the last band ended (else at the last entry)
 dscm_wrap_irqs:
 	.word	0                           @ IE & IF at the last entry
+dscm_wrap_pass:
+	.word	0                           @ popup.c: 1 = the IPC receive-FIFO interrupt may pass
+dscm_wrap_passes:
+	.word	0                           @ IPC interrupts passed with the band going on
+dscm_wrap_woke:
+	.word	0                           @ IPC interrupts whose handler woke a thread (the band ended)
+dscm_wrap_open:
+	.word	0                           @ 1 while a handler we called hasn't returned
+dscm_wrap_table:
+	.word	0                           @ OS_IRQTable
+dscm_wrap_switch:
+	.word	0                           @ OS_IrqHandler_ThreadSwitch
+dscm_wrap_info:
+	.word	0                           @ &OSi_ThreadInfo (isNeedRescheduling: its first halfword)
+dscm_wrap_wake:
+	.word	0                           @ SDK 2.0: the IRQ wake bits' halfword ThreadSwitch reads, else 0
+	.word	0                           @ WRAP_FLAGS
+	.word	0, 0, 0
 	.size dscm_irq_wrapper, . - dscm_irq_wrapper
 
 @ uint32_t dscm_cp15_control(void): CP15 c1, the control register (bit 13:
