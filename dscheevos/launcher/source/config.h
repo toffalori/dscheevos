@@ -16,6 +16,7 @@ typedef struct dsc_settings_t {
   char username[32];
   char token[64];       /* from the server at login; the password is never stored */
   char host[64];
+  unsigned long phone_ip;  /* not in the ini: the Cheevotron phone for this session (network byte order), 0 none */
 } dsc_settings_t;
 
 /* The game keeps the launcher's Wi-Fi during play for hardcore, live unlocks,

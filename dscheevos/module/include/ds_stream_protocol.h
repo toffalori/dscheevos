@@ -34,6 +34,8 @@
 #define DSS_T_CONTROL       0x85
 #define DSS_T_NOTICE        0x86   /* GameCube: a text line the console shows on the TV */
 #define DSS_T_CUE           0x87   /* phone tells the console an unlock/leaderboard/etc. fired, for the LED cue */
+#define DSS_T_PROBE         0x88   /* phone looks for consoles (session 0, no payload): an unpaired one answers HELLO to it */
+#define DSS_T_READY         0x89   /* phone answers a launcher's HELLO (dss_ready_t): it will pair once the game runs */
 
 #define DSS_MAX_TABLE_WORDS 1024
 #define DSS_TABLE_CHUNK     256
@@ -48,6 +50,7 @@
 #define DSS_DTCM_END        0x01003FFFu
 
 #define DSS_CAP_DTCM        0x01
+#define DSS_CAP_LAUNCHER    0x02         /* HELLO from the launcher before the game: answer READY, don't pair */
 
 #define DSS_FRAME_FULL      0x01
 #define DSS_FRAME_STALE     0x02
@@ -122,6 +125,18 @@ typedef struct __attribute__((packed)) {
   uint8_t command;         /* DSS_CTRL_* */
   uint8_t argument;
 } dss_control_t;           /* 2 */
+
+/* DSS_T_READY body: the phone that will take the game's stream */
+#define DSS_READY_OK        0            /* listening; the game will pair when it starts */
+#define DSS_READY_BUSY      1            /* another console is playing: the phone will ask to switch */
+#define DSS_READY_LOGGED_OUT 2           /* no RetroAchievements login on the phone */
+
+typedef struct __attribute__((packed)) {
+  uint8_t  state;          /* DSS_READY_* */
+  uint8_t  reserved;
+  uint16_t reserved2;
+  char     name[28];       /* the phone's name for the screen, NUL-padded */
+} dss_ready_t;             /* 32 */
 
 typedef struct __attribute__((packed)) {
   uint32_t vblank;

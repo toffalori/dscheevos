@@ -18,7 +18,7 @@ import sys
 import time
 
 MAGIC = 0x53435344          # "DSCS"
-BOOT_SIZE = 604             # sizeof(dscm_boot_t); checked by layout.c in CI
+BOOT_SIZE = 608             # sizeof(dscm_boot_t); checked by layout.c in CI
 FLAGS_OFFSET = 462          # offsetof(dscm_boot_t, flags), as layout.c prints it
 SESSION_MAX = 0x60000       # DSCM_SESSION_MAX
 BOOT_SPECTATOR = 0x01       # DSCM_BOOT_SPECTATOR
@@ -75,6 +75,8 @@ def build(args):
     ssid = args.ap_ssid.encode()
     head += fixed(args.ap_ssid, 33)[:32] + struct.pack("<B", len(ssid)) + bytes(6)
     head += struct.pack("<BBBB", 6, args.ap_security, 4, 4) + bytes(1 + 32)
+    # phone_ip (Cheevotron): no phone here
+    head += struct.pack("<I", 0)
     assert len(head) == BOOT_SIZE, len(head)
     return head + body
 

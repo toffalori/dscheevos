@@ -26,6 +26,7 @@
  * words to the phone. These replace the rcheevos paths in module_init and
  * module_idle below. */
 void dscm_stream_start(const char* hash, const char* game_code, const char* title, int dtcm_known);
+void dscm_stream_set_phone(uint32_t ip);
 int dscm_stream_net_init(void);
 void dscm_stream_service(uint32_t now_ms);
 void dscm_stream_frame(uint32_t frame);
@@ -792,6 +793,7 @@ int module_init(const dscm_boot_t* boot)
   {
     const char* ndsh = (const char*)0x027FFE00;
     dscm_stream_start(g_boot.game_hash, ndsh + 0x0C, ndsh + 0x00, H.dtcm_fixed);
+    dscm_stream_set_phone(g_boot.phone_ip);
   }
   if (dscm_stream_net_init() != 0)
     dscm_g_status.error = DSCM_ERROR_NO_MEMORY;

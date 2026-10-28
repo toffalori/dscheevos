@@ -11,8 +11,10 @@
 #include "log.h"
 #include "net.h"
 #include "pending.h"
+#include "phone.h"
 #include "session.h"
 #include "ui.h"
+#include "ds_stream_protocol.h"
 
 #include <dswifi9.h>
 #include <fat.h>
@@ -291,6 +293,66 @@ static void settings_menu(void)
   }
 }
 
+static int tick(void)
+{
+  ui_tick();
+  return 0;
+}
+
+static int tick_until_b(void)
+{
+  ui_tick();
+  scanKeys();
+  return (keysDown() & KEY_B) != 0;
+}
+
+/* Cheevotron: the phone runs the achievements, so find it before the game
+ * starts and say so: the player always knows whether this game counts. Keeps
+ * looking until the phone answers or the player plays without it. */
+static void find_phone(const char* hash)
+{
+  uint32_t known = phone_remembered();
+  phone_t phone;
+  settings.phone_ip = known;   /* playing without an answer, the game still tries it */
+  ui_status("Looking for your phone...");
+  for (;;) {
+    int found = phone_find(rom_path, hash, known, 60 * 3, tick, &phone) == 0;
+    if (!found) {
+      ui_status("\x1b[33;1mPhone not found\x1b[39;0m");
+      ui_clear_bottom();
+      ui_bottom("\n Open Cheevotron on your phone.\n The phone and the DSi need the\n same Wi-Fi network.\n\n Still looking...\n\n");
+      ui_bottom(" \x1b[31;1mB\x1b[39;0m  Play anyway (the phone can\n    join during the game)\n");
+      found = phone_find(rom_path, hash, known, -1, tick_until_b, &phone) == 0;
+      ui_clear_bottom();
+      if (!found) {
+        log_line("phone: playing without it");
+        return;
+      }
+    }
+    settings.phone_ip = known = phone.ip;
+    phone_remember(phone.ip);
+    if (phone.state == DSS_READY_LOGGED_OUT) {
+      ui_status("\x1b[33;1mPhone found, not logged in\x1b[39;0m");
+      if (ui_choose("Log in to RetroAchievements in\n the Cheevotron app.", "Try again", "Play anyway") == 'B') {
+        ui_clear_bottom();
+        return;
+      }
+      ui_clear_bottom();
+      ui_status("Looking for your phone...");
+      continue;
+    }
+    ui_status("\x1b[32;1mPhone ready%s%.18s\x1b[39;0m", phone.name[0] ? ": " : "", phone.name);
+    {
+      int i;
+      for (i = 0; i < 30; i++) {   /* long enough to read */
+        ui_tick();
+        cothread_yield_irq(IRQ_VBLANK);
+      }
+    }
+    return;
+  }
+}
+
 /* How we were started: the DSi Menu (hiyaCFW icon) and TWiLight Menu++ leave
  * different SCFG states. The ARM7 reports its own (arm7/source/main.c). */
 static void log_scfg(void)
@@ -384,6 +446,7 @@ int main(int argc, char** argv)
         continue;
       }
       log_line("wifi: connected");
+      find_phone(hash);
       if (!session_write(&settings, rom_path, hash)) {
         log_line("stream: couldn't write the session file");
         if (ui_choose("Couldn't write the session file.", "Try again", "Play without achievements") == 'B')

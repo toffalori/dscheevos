@@ -371,6 +371,7 @@ int session_write(const dsc_settings_t* settings, const char* rom_path, const ch
              | (settings->stream ? DSCM_BOOT_STREAM : 0)
              | (settings->cart ? DSCM_BOOT_CART : 0);
   boot.unix_time = (uint32_t)time(NULL);
+  boot.phone_ip = (uint32_t)settings->phone_ip;
   if (net_clock_offset_q(&boot.utc_offset_q))
     boot.flags |= DSCM_BOOT_UTC_KNOWN;
   /* Each reply and the CA end in at least one NUL (DSCM_SESSION_PAD): the

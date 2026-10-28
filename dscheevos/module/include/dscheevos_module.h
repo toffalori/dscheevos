@@ -217,6 +217,7 @@ typedef struct dscm_boot_t {
   uint8_t ap_group_cipher;
   uint8_t pmk_valid;                  /* the two pmk fields are 0 in the file: nds-bootstrap */
   uint8_t pmk[32];                    /* fills them in RAM from the console's own Wi-Fi settings */
+  uint32_t phone_ip;                  /* Cheevotron: the phone the launcher found (network byte order), 0 none */
 } dscm_boot_t;
 
 /* Bytes a reply (or the CA) of n bytes takes in the session file: itself,

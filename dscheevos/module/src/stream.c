@@ -55,6 +55,7 @@ static int       g_paired;
 static uint16_t  g_session;            /* phone-chosen, adopted from TABLE; 0 unpaired */
 static ip_addr_t g_phone_ip;
 static uint16_t  g_phone_port;
+static int       g_phone_known;        /* g_phone_ip: the launcher's phone, a PROBE's sender or the last pairing */
 static uint32_t  g_last_phone_ms;
 static uint32_t  g_last_hello_ms;
 static int       g_force_full;
@@ -101,6 +102,8 @@ static void send_to(const ip_addr_t* ip, uint16_t port, const uint8_t* data, uin
 
 /* ---- outgoing ---- */
 
+/* HELLO to everyone, and straight to the phone we know: a phone with its
+ * screen off drops broadcasts after a few seconds, but still takes unicast. */
 static void send_hello(void)
 {
   uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_hello_t)];
@@ -109,6 +112,8 @@ static void send_hello(void)
   memcpy(body, &g_hello, sizeof(dss_hello_t));
   ip_addr_set_ip4_u32(&bcast, 0xFFFFFFFFu);   /* 255.255.255.255 */
   send_to(&bcast, DSS_PORT, buf, (uint16_t)sizeof(buf));
+  if (g_phone_known)
+    send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)sizeof(buf));
 }
 
 /* Read the watched words into out (table order); IRQs masked so no VBlank
@@ -329,8 +334,17 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
           g_session = session;
           ip_addr_copy(g_phone_ip, *addr);
           g_phone_port = port;
+          g_phone_known = 1;
           g_last_phone_ms = 0;        /* set by the caller's clock next service */
           on_table(body, length);
+        } else if (type == DSS_T_PROBE) {
+          /* a phone looking for us: answer it directly, and keep telling it */
+          if (!g_paired) {
+            ip_addr_copy(g_phone_ip, *addr);
+            g_phone_port = port;
+            g_phone_known = 1;
+            send_hello();
+          }
         } else if (g_paired && session == g_session) {
           switch (type) {
             case DSS_T_PEEK:      on_peek(body, length); break;
@@ -359,6 +373,17 @@ void dscm_stream_start(const char* hash, const char* game_code, const char* titl
   if (hash)  memcpy(g_hello.hash, hash, strnlen(hash, sizeof(g_hello.hash)));
   if (game_code) memcpy(g_hello.game_code, game_code, strnlen(game_code, sizeof(g_hello.game_code)));
   if (title) memcpy(g_hello.title, title, strnlen(title, sizeof(g_hello.title)));
+}
+
+/* The phone the launcher found before the game (network byte order; 0 none):
+ * HELLO goes to it directly as well as to everyone. */
+void dscm_stream_set_phone(uint32_t ip)
+{
+  if (!ip)
+    return;
+  ip_addr_set_ip4_u32(&g_phone_ip, ip);
+  g_phone_port = DSS_PORT;
+  g_phone_known = 1;
 }
 
 int dscm_stream_net_init(void)
