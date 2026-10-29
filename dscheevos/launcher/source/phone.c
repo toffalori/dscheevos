@@ -233,7 +233,7 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
         dss_replay_req_t req;
         memcpy(&req, body, sizeof(req));
         if (!told && req.run == rec->h.run) {
-          ui_status("Replaying the last game to the phone...");
+          ui_status("Replaying last game to phone...");   /* 32 columns */
           told = 1;
         }
         send_piece(fd, rec, &req, &from);

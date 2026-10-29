@@ -864,8 +864,11 @@ line_vcount:
 	tst	r1, #0xC000
 	tstne	r1, #0x1F
 	bne	line_skip
-	ldr	r1, [r12, #0x64]            @ DISPCAPCNT: a capture on
-	tst	r1, #0x80000000
+	mov	r0, #128
+	ldr	r1, [r12, #0x64]            @ DISPCAPCNT: a capture that takes the main-memory FIFO (source
+	tst	r1, #0x80000000             @ B the FIFO, B in the capture) would take the band's words. One
+	tstne	r1, #0x02000000             @ of the graphics screen (A) or of VRAM never sees the band:
+	tstne	r1, #0x60000000             @ HeartGold captures every 8-16 frames while walking
 	bne	line_skip
 	mov	r0, #16
 	add	r1, r12, #0x300

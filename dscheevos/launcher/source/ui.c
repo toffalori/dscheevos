@@ -157,10 +157,11 @@ void ui_status(const char* fmt, ...)
   consoleSelect(&top);
   va_start(ap, fmt);
   if (splash_rows) {
-    /* One centred status line on the splash, replacing the previous one. */
+    /* One centred status line on the splash, replacing the previous one
+     * (and its second row, where a long one wrapped). */
     char line[64];
     vsnprintf(line, sizeof(line), fmt, ap);
-    printf("\x1b[%d;0H\x1b[2K", splash_rows);
+    printf("\x1b[%d;0H\x1b[2K\x1b[%d;0H\x1b[2K", splash_rows + 1, splash_rows);
     center(splash_rows, line);
   } else {
     printf(" ");

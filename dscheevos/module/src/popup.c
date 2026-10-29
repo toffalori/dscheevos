@@ -1018,8 +1018,10 @@ static void arm(void)
     goto out;
   }
   d = DISPCNT;
+  /* a capture only when it takes the main-memory FIFO (source B, in the
+   * capture): one of the graphics screen or VRAM never sees the band (start.s) */
   if ((d & MODE_MASK) != MODE_1 || (d & 0x80) || ((MASTER_BRIGHT >> 14) && (MASTER_BRIGHT & 31))
-      || (DISPCAPCNT & 0x80000000u)) {
+      || ((DISPCAPCNT & 0x82000000u) == 0x82000000u && (DISPCAPCNT & 0x60000000u))) {
     SKIP(skip_display, 2);
     goto out;
   }
