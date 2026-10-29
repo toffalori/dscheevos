@@ -166,8 +166,15 @@ static void read_words(uint8_t* out, uint16_t count)
   uint32_t cpsr = dscm_irq_off();
   uint16_t i;
   for (i = 0; i < count; i++) {
-    if (!dscm_stream_read_bytes(g_watch[i], out + i * 4, 4))
+    /* a word in main RAM read straight: through the call, HeartGold's 1024
+     * words kept IRQs masked about 2.5 ms, past the pop-up band's VCOUNT IRQ */
+    const uint32_t a = g_watch[i];
+    if (a < 0x400000u && !(a & 3)) {
+      const uint32_t v = *(const volatile uint32_t*)(0x02000000u + a);
+      memcpy(out + i * 4, &v, 4);
+    } else if (!dscm_stream_read_bytes(a, out + i * 4, 4)) {
       memset(out + i * 4, 0, 4);
+    }
   }
   dscm_irq_restore(cpsr);
 }

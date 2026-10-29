@@ -860,10 +860,13 @@ line_vcount:
 	cmp	r2, #0x10000
 	bne	line_skip
 	mov	r0, #8
-	ldrh	r1, [r12, #0x6C]            @ MASTER_BRIGHT: a fade would hide it anyway
-	tst	r1, #0xC000
-	tstne	r1, #0x1F
-	bne	line_skip
+	ldrh	r1, [r12, #0x6C]            @ MASTER_BRIGHT: a full fade (factor 16 or more, the screen
+	tst	r1, #0xC000                 @ all black or white) hides it anyway; a partial one dims it
+	beq	1f                          @ with the game (HeartGold sets small factors indoors every
+	and	r1, r1, #0x1F               @ few frames)
+	cmp	r1, #16
+	bhs	line_skip
+1:
 	mov	r0, #128
 	ldr	r1, [r12, #0x64]            @ DISPCAPCNT: a capture that takes the main-memory FIFO (source
 	tst	r1, #0x80000000             @ B the FIFO, B in the capture) would take the band's words. One
