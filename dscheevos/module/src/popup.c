@@ -412,7 +412,7 @@ void dscm_popup_set_mode(uint8_t mode);
 /* A pop-up of the console's own, for when no phone can send one (the link to
  * it lost): shown like the phone's, its states going nowhere. A dry run the
  * phone asked for turns on: with the phone gone, nobody reads the counters. */
-void dscm_popup_local(const char* title, const char* detail, const char* value)
+void dscm_popup_local(const char* title, const char* detail, const char* value, uint16_t hold)
 {
   static popup_t p;
   static uint16_t id = 0xFF00;                 /* above the phone's ids */
@@ -424,7 +424,7 @@ void dscm_popup_local(const char* title, const char* detail, const char* value)
   p.st.popup_id = id;
   id = (uint16_t)(id == 0xFFFF ? 0xFF00 : id + 1);
   p.style = DSS_POPUP_TOAST;
-  p.hold = 600;                                /* 10 s: time to read it */
+  p.hold = hold;                               /* frames: 600 (10 s) for something to read */
   strncpy(p.label, "Cheevotron", DSS_POPUP_LABEL_MAX);
   strncpy(p.title, title, DSS_POPUP_TITLE_MAX);
   strncpy(p.detail, detail, DSS_POPUP_DETAIL_MAX);

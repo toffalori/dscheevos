@@ -36,7 +36,7 @@ void dscm_popup_on_popup(const uint8_t* body, uint16_t len);
 void dscm_popup_on_badge(const uint8_t* body, uint16_t len);
 void dscm_popup_set_mode(uint8_t mode);
 void dscm_popup_status(dss_display_status_t* out);
-void dscm_popup_local(const char* title, const char* detail, const char* value);
+void dscm_popup_local(const char* title, const char* detail, const char* value, uint16_t hold);
 
 /* record.c: the recording the phone replays after a drop */
 void dscm_rec_init(void* ring, uint32_t size, uint16_t run, const char* hash);
@@ -81,6 +81,8 @@ static uint32_t  g_last_hello_ms;
 static int       g_force_full;
 static uint32_t  g_lost_ms;            /* when a pairing timed out (0: none since the last) */
 static uint8_t   g_lost_shown;         /* "Phone link lost" notices shown since */
+static uint32_t  g_reconnect_ms;        /* the in-game menu's Reconnect: when (0: none waiting) */
+#define RECONNECT_WAIT_MS 60000u       /* no phone this long after it: the link-lost notice again */
 
 /* the recording: this run's id (HELLO), and a replay the phone is reading */
 static uint16_t  g_run;
@@ -565,13 +567,13 @@ static void lost_notice(uint32_t now_ms)
   static const uint32_t at_ms[2] = { 0, 120000 };
   dss_link_status_t l;
   char value[DSS_POPUP_VALUE_MAX + 1];
-  if (!g_lost_ms || g_lost_shown >= 2 || now_ms - g_lost_ms < at_ms[g_lost_shown])
+  if (!g_lost_ms || g_lost_shown >= 2 || g_reconnect_ms || now_ms - g_lost_ms < at_ms[g_lost_shown])
     return;
   link_diag(&l);
   snprintf(value, sizeof(value), "R%u K%u J%u C%u", (unsigned)l.cause_reason, (unsigned)l.need_ptk, (unsigned)l.join,
            (unsigned)l.connect_events);
   g_lost_shown++;
-  dscm_popup_local("Phone not reachable", g_recording ? "Recording: unlocks will follow" : "Achievements paused for now", value);
+  dscm_popup_local("Phone not reachable", g_recording ? "Recording: unlocks will follow" : "Achievements paused for now", value, 600);
 }
 
 /* The link in one line of text in the recording's header on the SD card
@@ -609,7 +611,24 @@ static void link_note(uint32_t line, uint32_t now_ms)
 void dscm_stream_reconnect(void)
 {
   link_reconnect();
-  dscm_popup_local("Reconnecting...", "Looking for the phone", "");
+  g_reconnect_ms = g_now_ms ? g_now_ms : 1;
+  dscm_popup_local("Reconnecting...", "Looking for the phone", "", 180);
+}
+
+/* After a reconnect: "Reconnected" once the phone is heard on the new
+ * association; after RECONNECT_WAIT_MS without it, the link-lost notice
+ * (held back meanwhile) says the rest. */
+static void reconnect_check(uint32_t now_ms, int link_is_up)
+{
+  if (!g_reconnect_ms)
+    return;
+  if (g_paired && link_is_up && (int32_t)(g_last_phone_ms - g_reconnect_ms) > 0) {
+    g_reconnect_ms = 0;
+    g_lost_ms = 0;
+    dscm_popup_local("Reconnected", "The phone is back", "", 180);
+  } else if (now_ms - g_reconnect_ms > RECONNECT_WAIT_MS) {
+    g_reconnect_ms = 0;
+  }
 }
 
 /* Called each idle pass after net_service(now_ms): the recv callback has
@@ -622,9 +641,12 @@ void dscm_stream_service(uint32_t now_ms)
   if (link_is_up != link_was_up) {
     link_was_up = link_is_up;
     link_note(0, now_ms);
+    if (link_is_up && g_reconnect_ms)
+      g_reconnect_ms = now_ms ? now_ms : 1;   /* the phone must be heard on this association */
   }
   if (g_last_phone_ms == 1)         /* the callback heard from the phone this pass */
     g_last_phone_ms = now_ms ? now_ms : 1;
+  reconnect_check(now_ms, link_is_up);
   dscm_g_status.net_detail = g_paired ? g_session : 0;   /* nonzero in the menu = paired */
   if (g_replaying && now_ms - g_replay_ms > DSS_REPLAY_TIMEOUT_MS) {
     g_replaying = 0;                /* the phone stopped reading: live again, from a FULL */
