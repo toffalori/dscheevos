@@ -107,20 +107,54 @@ static void restore_twlcfg(void)
   log_line("twlcfg: restored from SD-NAND (%s), wlfirm %d", twlcfg_present() ? "valid" : "INVALID", wl_type);
 }
 
+static void log_scfg(void);
+
+/* How we were started, for launcher.log. Once, and after the Wi-Fi start
+ * where there is one: its log writes then go on during the association. */
+static void log_start_state(void)
+{
+  static int done;
+  if (done)
+    return;
+  done = 1;
+  log_scfg();
+  if (isDSiMode())
+    log_line("twlcfg at start: %s (%02X %02X 448=%02X), cid@2FFD7BC=%08lX",
+             twlcfg_present() ? "present" : "missing", TWLCFG[0], TWLCFG[1], TWLCFG[0x48],
+             (unsigned long)*(vu32*)0x02FFD7BC);
+}
+
+/* Cheevotron: the Wi-Fi association takes 1.5-3 s. Start it as soon as the
+ * game is known and let it run while the stub, the recording and the screens
+ * get ready; the stream path's net_connect then waits for what is left. */
+static void start_wifi_early(void)
+{
+  if (!settings.enabled || !settings.stream)
+    return;
+  wifi_started = 1;
+  if (net_start() == 0)
+    log_line("wifi: started");
+  else
+    log_line("wifi: %s", net_error());
+  log_start_state();
+}
+
 /* Hands over to nds-bootstrap; only returns on failure. */
 static void boot_game(int with_achievements)
 {
   int keep_wifi = with_achievements && settings_keep_wifi(&settings);
   const char* argv[1] = { BOOTSTRAP_PATH };
+  log_start_state();
   if (!with_achievements)
     remove(DSC_DIR "session.bin");
   /* Cheevotron's splash says "Loading..." already; the status line clears, so
    * the screen matches nds-bootstrap's copy of it */
   ui_status(!with_achievements ? "Starting without achievements..."
             : settings.stream ? "" : "Starting with achievements...");
-  if (keep_wifi)
+  if (keep_wifi) {
     hand_over_wifi();
-  else if (wifi_started)
+    log_line("wifi: handed over");
+  } else if (wifi_started)
     Wifi_DisableWifi();   /* never started otherwise: DSWiFi's IPC isn't set up, it data-aborts */
   restore_twlcfg();
   log_line("chainload");
@@ -311,6 +345,18 @@ static int tick_until_b(void)
   return (keysDown() & KEY_B) != 0;
 }
 
+static unsigned long phone_ready_ms;   /* when "Phone ready" went up, 0 if it didn't */
+
+/* "Phone ready" stays up long enough to read (0.5 s, counted from when it
+ * went up: the session files are written meanwhile). */
+static void let_phone_ready_show(void)
+{
+  while (phone_ready_ms && log_ms() - phone_ready_ms < 500) {
+    ui_tick();
+    cothread_yield_irq(IRQ_VBLANK);
+  }
+}
+
 /* Cheevotron: the phone runs the achievements, so find it before the game
  * starts and say so: the player always knows whether this game counts. Keeps
  * looking until the phone answers or the player plays without it. A
@@ -349,13 +395,7 @@ static void find_phone(const char* hash, recording_t* rec)
       continue;
     }
     ui_status("\x1b[32;1mPhone ready%s%.18s\x1b[39;0m", phone.name[0] ? ": " : "", phone.name);
-    {
-      int i;
-      for (i = 0; i < 30; i++) {   /* long enough to read */
-        ui_tick();
-        cothread_yield_irq(IRQ_VBLANK);
-      }
-    }
+    phone_ready_ms = log_ms() | 1;   /* never 0 */
     return;
   }
 }
@@ -396,11 +436,6 @@ int main(int argc, char** argv)
     for (;;) swiWaitForVBlank();
   }
   log_start();
-  log_scfg();
-  if (isDSiMode())
-    log_line("twlcfg at start: %s (%02X %02X 448=%02X), cid@2FFD7BC=%08lX",
-             twlcfg_present() ? "present" : "missing", TWLCFG[0], TWLCFG[1], TWLCFG[0x48],
-             (unsigned long)*(vu32*)0x02FFD7BC);
   settings_load(&settings);
   if (settings.cart) {
     /* Cheevotron cart mode: the game is the cartridge in the slot, whatever
@@ -421,6 +456,9 @@ int main(int argc, char** argv)
       ui_clear_bottom();
       ui_status("Reading the cartridge...");
     }
+    /* after the header read: the slot's power-cycle is a request to the ARM7,
+     * which DSWiFi's start-up there could hold up past the read's waits */
+    start_wifi_early();
     if (!cart_write_stub(header, rom_path, sizeof(rom_path))) {
       ui_wait("Couldn't write to the SD card.", 120);
       boot_game(0);
@@ -429,8 +467,10 @@ int main(int argc, char** argv)
     ui_header("", NULL);
     ui_status("No game in _nds/nds-bootstrap.ini.");
     ui_status("Start games from TWiLight Menu++.");
+    log_start_state();
     for (;;) swiWaitForVBlank();
-  }
+  } else
+    start_wifi_early();
   /* Cheevotron keeps the splash; on-console achievements list the session below a header */
   if (settings.stream)
     ui_splash(basename_of(rom_path));
@@ -500,6 +540,7 @@ int main(int argc, char** argv)
           boot_game(0);
         continue;
       }
+      let_phone_ready_show();
       boot_game(1);
     }
   }

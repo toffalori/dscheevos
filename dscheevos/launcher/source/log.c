@@ -21,6 +21,11 @@ static unsigned long ticks_ms(void)
   return (unsigned long)(cpuGetTiming() / (BUS_CLOCK / 1000));
 }
 
+unsigned long log_ms(void)
+{
+  return ticks_ms();
+}
+
 void log_start(void)
 {
   FILE* f = fopen(LOG_PATH, "w");

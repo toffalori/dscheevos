@@ -6,5 +6,6 @@
 
 void log_start(void);                  /* truncates the file */
 void log_line(const char* fmt, ...);
+unsigned long log_ms(void);            /* ms since log_start; wraps after 128 s */
 
 #endif

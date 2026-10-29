@@ -72,6 +72,26 @@ static void stub_name(const uint8_t header[0x200], char* name, int size)
   name[n] = '\0';
 }
 
+/* Whether the stub on the SD card is already this header and its zeros:
+ * writing it took about 1 s at every start, reading it back a few ms. */
+static int stub_written(const char* path, const uint8_t header[0x200])
+{
+  static uint8_t stub[STUB_SIZE];
+  struct stat st;
+  FILE* f;
+  int i, same;
+  if (stat(path, &st) != 0 || st.st_size != STUB_SIZE)
+    return 0;
+  f = fopen(path, "rb");
+  if (!f)
+    return 0;
+  same = fread(stub, 1, STUB_SIZE, f) == STUB_SIZE && !memcmp(stub, header, 0x200);
+  fclose(f);
+  for (i = 0x200; same && i < STUB_SIZE; i++)
+    same = !stub[i];
+  return same;
+}
+
 int cart_write_stub(const uint8_t header[0x200], char* rom_path, int size)
 {
   static const uint8_t zeros[0x200];
@@ -79,8 +99,12 @@ int cart_write_stub(const uint8_t header[0x200], char* rom_path, int size)
   FILE* f;
   int i, ok;
   stub_name(header, name, sizeof(name));
-  mkdir(CART_DIR, 0777);
   snprintf(rom_path, (size_t)size, CART_DIR "/%s.nds", name);
+  if (stub_written(rom_path, header)) {
+    log_line("cart: stub %s as written before", rom_path);
+    return 1;
+  }
+  mkdir(CART_DIR, 0777);
   f = fopen(rom_path, "wb");
   if (!f) {
     log_line("cart: can't write %s", rom_path);

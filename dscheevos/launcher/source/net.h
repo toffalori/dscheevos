@@ -9,6 +9,11 @@
  * DSi's own Wi-Fi (WPA2) when available. Returns 0 when online. Calls
  * each_frame (if any) once per frame while it waits. */
 int net_connect(int timeout_frames, void (*each_frame)(void));
+
+/* Starts DSWiFi and the search for a saved access point without waiting for
+ * it: the association goes on while the caller does other work, and the next
+ * net_connect waits for it. Returns 0 when started. */
+int net_start(void);
 const char* net_error(void);
 
 /* The access point we joined, as seen in its beacons (no keys). */
