@@ -52,7 +52,9 @@ static void put(const void* data, uint32_t len)
 static void put16(uint32_t v) { const uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) }; put(b, 2); }
 static void put32(uint32_t v) { const uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; put(b, 4); }
 
-/* Completed sectors to RAM (the ARM7 reads them there), then the counters. */
+/* Completed sectors to RAM (the ARM7 reads them there), then the counters.
+ * Only the module's part of the header: the ARM7 writes the rest during
+ * play, and cleaning its lines would put this cache's stale copy back. */
 static void publish(void)
 {
   const uint32_t done = g_written - g_written % DSS_REC_SECTOR;
@@ -62,7 +64,7 @@ static void publish(void)
   }
   g_rec.written = g_written;
   g_rec.end_frame = g_frame;
-  dscm_dc_clean(&g_rec, sizeof(g_rec));
+  dscm_dc_clean(&g_rec, DSCM_REC_ARM9_BYTES);
 }
 
 void dscm_rec_init(void* ring, uint32_t size, uint16_t run, const char* hash)

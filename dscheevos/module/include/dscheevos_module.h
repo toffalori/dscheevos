@@ -386,27 +386,13 @@ typedef struct dscm_journal_t {
 
 /* Cheevotron streamer: the recording's ring (DSS_CAP_RECORD; the record
  * format is in ds_stream_protocol.h), for the ARM7 to mirror onto the SD
- * card. The module appends records and advances `written`; the ARM7 copies
- * every completed DSS_REC_SECTOR of the stream (sector k = stream bytes
- * k*512..k*512+511, at ring + (k*512 % ring_size)) to the data sector
- * k % data_sectors of sd:/_nds/dscheevos/recording.bin (created by the
- * launcher at its full size, its clusters fixed during play), before the
- * ring overwrites it, and keeps the file's header sector current. The
- * ring's lines are cleaned to RAM as they complete. */
-#define DSCM_REC_MAGIC 0x43455244u  /* "DREC" */
-typedef struct dscm_rec_t {
-  uint32_t magic;                     /* DSCM_REC_MAGIC */
-  uint32_t ring;                      /* physical address of the ring */
-  uint32_t ring_size;                 /* bytes, a multiple of DSS_REC_SECTOR */
-  uint16_t run;                       /* the run id (HELLO's run) */
-  uint16_t reserved;
-  char     game_hash[32];             /* lowercase hex, no terminator */
-  volatile uint32_t written;          /* stream bytes recorded so far (the ring holds the last ring_size of them) */
-  volatile uint32_t segment;          /* stream offset of the latest segment */
-  volatile uint32_t end_frame;        /* the frame of the last record */
-  volatile uint32_t sd_written;       /* the ARM7: stream bytes on the SD card (whole sectors) */
-  volatile uint32_t sd_skipped;       /* the ARM7: sectors overwritten in the ring before it could write them */
-} dscm_rec_t;
+ * card, and the file it mirrors it into: dscm_rec_t and the file layout are
+ * in dscm_record.h (shared with nds-bootstrap, like dscm_shim.h). The module
+ * appends records and advances `written`, cleaning the ring's lines to RAM
+ * as sectors complete; the ARM7 copies every completed DSS_REC_SECTOR of
+ * the stream (sector k = stream bytes k*512..k*512+511, at
+ * ring + (k*512 % ring_size)) before the ring overwrites it. */
+#include "dscm_record.h"
 
 typedef struct dscm_header_t {
   uint32_t magic;

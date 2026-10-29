@@ -6,12 +6,14 @@
  * reads the same ini and loads the module with the session.
  */
 #include "apfix.h"
+#include "cart.h"
 #include "chainload.h"
 #include "config.h"
 #include "log.h"
 #include "net.h"
 #include "pending.h"
 #include "phone.h"
+#include "recording.h"
 #include "session.h"
 #include "ui.h"
 #include "ds_stream_protocol.h"
@@ -308,21 +310,23 @@ static int tick_until_b(void)
 
 /* Cheevotron: the phone runs the achievements, so find it before the game
  * starts and say so: the player always knows whether this game counts. Keeps
- * looking until the phone answers or the player plays without it. */
-static void find_phone(const char* hash)
+ * looking until the phone answers or the player plays without it. A
+ * recording of an earlier run the phone hasn't seen the end of (rec, or
+ * NULL) is offered to it meanwhile. */
+static void find_phone(const char* hash, recording_t* rec)
 {
   uint32_t known = phone_remembered();
   phone_t phone;
   settings.phone_ip = known;   /* playing without an answer, the game still tries it */
   ui_status("Looking for your phone...");
   for (;;) {
-    int found = phone_find(rom_path, hash, known, 60 * 3, tick, &phone) == 0;
+    int found = phone_find(rom_path, hash, known, 60 * 3, tick, &phone, rec) == 0;
     if (!found) {
       ui_status("\x1b[33;1mPhone not found\x1b[39;0m");
       ui_clear_bottom();
       ui_bottom("\n Open Cheevotron on your phone.\n The phone and the DSi need the\n same Wi-Fi network.\n\n Still looking...\n\n");
       ui_bottom(" \x1b[31;1mB\x1b[39;0m  Play anyway (the phone can\n    join during the game)\n");
-      found = phone_find(rom_path, hash, known, -1, tick_until_b, &phone) == 0;
+      found = phone_find(rom_path, hash, known, -1, tick_until_b, &phone, rec) == 0;
       ui_clear_bottom();
       if (!found) {
         log_line("phone: playing without it");
@@ -395,8 +399,29 @@ int main(int argc, char** argv)
              twlcfg_present() ? "present" : "missing", TWLCFG[0], TWLCFG[1], TWLCFG[0x48],
              (unsigned long)*(vu32*)0x02FFD7BC);
   settings_load(&settings);
-  if (settings.cart) settings.stream = 1;   /* a cart session is a stream session */
-  if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
+  if (settings.cart) {
+    /* Cheevotron cart mode: the game is the cartridge in the slot, whatever
+     * the ini names (TWiLight Menu++'s last SD game). Its header gives the
+     * name, the game code and the phone check; written to a stub file, it
+     * stands in for the ROM everywhere a file is expected (nds-bootstrap's
+     * first stage reads its settings from it), and nds-bootstrap boots and
+     * hashes the cartridge itself. A cart session is a stream session. */
+    static uint8_t header[0x200] __attribute__((aligned(4)));
+    settings.stream = 1;
+    bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode);   /* for DSI_MODE only */
+    ui_status("Reading the cartridge...");
+    while (!cart_read_header(header)) {
+      ui_status("\x1b[33;1mNo game cartridge found\x1b[39;0m");
+      if (ui_choose("Insert a DS game cartridge.", "Try again", "Play without achievements") == 'B')
+        boot_game(0);
+      ui_clear_bottom();
+      ui_status("Reading the cartridge...");
+    }
+    if (!cart_write_stub(header, rom_path, sizeof(rom_path))) {
+      ui_wait("Couldn't write to the SD card.", 120);
+      boot_game(0);
+    }
+  } else if (!bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode)) {
     ui_header("", NULL);
     ui_status("No game in _nds/nds-bootstrap.ini.");
     ui_status("Start games from TWiLight Menu++.");
@@ -420,20 +445,35 @@ int main(int argc, char** argv)
     boot_game(0);
   }
 
-  ui_status("Checking the game...");
-  if (!hash_rom(rom_path, hash)) {
-    ui_wait("Couldn't read the game file.", 120);
-    boot_game(0);
+  if (settings.cart) {
+    /* The cartridge can't be hashed here: its ARM9 and ARM7 binaries are
+     * behind the KEY1 handshake, which only nds-bootstrap's bootloader does.
+     * The session and the phone check go out without a hash (title and game
+     * code only); the bootloader computes the hash from the card and the
+     * game's HELLO carries it. AP-fix files and donor ROMs are SD-game
+     * matters: a cartridge runs as it is. */
+    hash[0] = '\0';
+    ui_status("Cartridge: %.20s", basename_of(rom_path));
+  } else {
+    ui_status("Checking the game...");
+    if (!hash_rom(rom_path, hash)) {
+      ui_wait("Couldn't read the game file.", 120);
+      boot_game(0);
+    }
+    if (settings.hardcore)
+      check_apfix();
+    check_donor();
   }
-  if (settings.hardcore)
-    check_apfix();
-  check_donor();
 
   if (settings.stream) {
     /* Cheevotron: no RetroAchievements on the console. Bring up the Wi-Fi the
      * game keeps for the phone, write a session with only the Wi-Fi config and
      * the game hash (no login, no set download, no placard), and boot. The
-     * phone runs rcheevos over the streamed RAM. The splash is up already. */
+     * phone runs rcheevos over the streamed RAM. The splash is up already.
+     * A recording of the last run the phone missed the end of is offered to
+     * it while it is looked for; the file is made ready for this run's. */
+    static recording_t recording;
+    recording_t* offer = recording_offer(&recording) ? &recording : NULL;
     for (;;) {
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
@@ -446,7 +486,10 @@ int main(int argc, char** argv)
         continue;
       }
       log_line("wifi: connected");
-      find_phone(hash);
+      find_phone(hash, offer);
+      recording_free(&recording);
+      if (!recording_prepare(rom_path, hash))
+        log_line("recording: couldn't prepare %s: this run won't be kept", DSCM_REC_FILE);
       if (!session_write(&settings, rom_path, hash)) {
         log_line("stream: couldn't write the session file");
         if (ui_choose("Couldn't write the session file.", "Try again", "Play without achievements") == 'B')
