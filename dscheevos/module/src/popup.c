@@ -83,7 +83,6 @@ extern void dscm_dc_invalidate(const void* addr, uint32_t len);
 #define REG_IF         REG32(0x04000214)
 #define POWCNT1        REG16(0x04000304)
 #define DMA_CNT(x)     REG32(0x040000B8 + (x) * 12)
-#define NDMA_GCNT      REG32(0x04004100)       /* arbitration: bit 31 round robin */
 #define NDMA_SAD(x)    REG32(0x04004104 + (x) * 0x1C)
 #define NDMA_DAD(x)    REG32(0x04004108 + (x) * 0x1C)
 #define NDMA_TCNT(x)   REG32(0x0400410C + (x) * 0x1C)
@@ -1109,7 +1108,8 @@ enum {
   LC_VC = 128, LC_ARMS = 132, LC_WHOLE = 136, LC_CUT = 140, LC_LATE = 144, LC_SKIP = 148, LC_LEAK = 152,
   LC_MODE0 = 156, LC_REASSERT = 160, LC_ENDED = 164, LC_LATENCY = 168, LC_SPIN = 172, LC_STANDDOWN = 176,
   LC_SKIPWHY = 180, LW_T2ADDR = 192, LW_T2VAL = 196, LW_NEXPIRE = 200, LW_LYC2 = 204,
-  LC_DMASEEN = 208, LC_BUSYS = 212, LC_BUSYE = 216, LC_XMIN = 220, LC_XMAX = 224, LC_XN = 228,
+  LC_DMASEEN = 208, LC_BUSYS = 212, LC_BUSYE = 216, LW_HOLD = 232, LC_HELD = 236, LC_HOLDIPC = 240,
+  LC_GXS = 244, LC_GXE = 248,
 };
 #define LC_COUNT     10                        /* LC_VC .. LC_ENDED, read as deltas each tick */
 #define LINE_EXPIRE  120                       /* frames a published band stays good without the idle pass */
@@ -1121,7 +1121,8 @@ static uint8_t  g_line;                        /* the line path is installed */
 static uint8_t  g_line_off;                    /* left to the game's VCOUNT use: the idle-armed path for the game */
 static uint8_t  g_line_used;                   /* a line path went up in this game: the leak watch from then on */
 static uint32_t g_line_seen[LC_COUNT];         /* the counters at the last tick */
-static uint32_t g_feed_seen[3];                /* LC_BUSYS, LC_BUSYE, LC_XN at the last tick */
+static const uint16_t k_feed_off[6] = { LC_BUSYS, LC_BUSYE, LC_GXS, LC_GXE, LC_HELD, LC_HOLDIPC };
+static uint32_t g_feed_seen[6];                /* those counters at the last tick */
 
 /* GX_DispOff, word for word in NitroSDK 2.0 (Super Mario 64 DS) and 4.x
  * (Pokemon HG, Platinum): DISPCNT's mode bits saved in sDispMode (ldr r0,=),
@@ -1182,14 +1183,15 @@ static void dispoff_scan(void)
 
 static int line_wanted(void)
 {
-  return g_mode >= DSS_DISPLAY_DRY && g_mode <= DSS_DISPLAY_ON && !g_line_off && !g_standdown;
+  return ((g_mode >= DSS_DISPLAY_DRY && g_mode <= DSS_DISPLAY_ON) || g_mode == DSS_DISPLAY_ON_HOLD)
+         && !g_line_off && !g_standdown;
 }
 
 /* 0 watch (our VCOUNT IRQ only), 1 dry (the feed, and the game's own mode
  * written), 2 on */
 static uint32_t line_stage(void)
 {
-  return g_mode == DSS_DISPLAY_ON ? 2 : g_mode == DSS_DISPLAY_NOOP ? 1 : 0;
+  return g_mode == DSS_DISPLAY_ON || g_mode == DSS_DISPLAY_ON_HOLD ? 2 : g_mode == DSS_DISPLAY_NOOP ? 1 : 0;
 }
 
 /* A legacy DMA channel in main-memory display mode: the game feeds the FIFO
@@ -1268,8 +1270,6 @@ static int line_install(void)
   }
   for (i = 64; i < 256; i += 4)
     LW(i) = 0;
-  LW(LC_XMIN) = 0x7FFFFFFFu;
-  LW(LC_XMAX) = 0x80000000u;
   LW(LW_T2ADDR) = g_disp.table + 2 * 4;
   LW(LW_T2VAL) = CODE32(g_disp.table + 2 * 4);
   LW(LW_STAGE) = line_stage();
@@ -1287,9 +1287,8 @@ static int line_install(void)
   dscm_irq_restore(cpsr);
   for (i = 0; i < LC_COUNT; i++)
     g_line_seen[i] = 0;
-  for (i = 0; i < 3; i++)
+  for (i = 0; i < 6; i++)
     g_feed_seen[i] = 0;
-  g_stats.feed_gcnt = NDMA_GCNT;
   g_line = 1;
   dscm_popup_watch = 1;
   return 1;
@@ -1327,6 +1326,7 @@ static void line_publish(int rows)
 {
   const uint32_t cpsr = dscm_irq_off();
   LW(LW_STAGE) = line_stage();
+  LW(LW_HOLD) = g_mode == DSS_DISPLAY_ON_HOLD;
   if (rows > 0) {
     LW(LW_NFIRST) = (uint32_t)(192 - rows);
     LW(LW_NSRC) = g_src + (uint32_t)(g_rows - rows) * 512;
@@ -1371,23 +1371,20 @@ static uint32_t line_collect(uint32_t* cut)
   g_stats.line_skipwhy = (uint8_t)LW(LC_SKIPWHY);
   g_stats.line_standdown = (uint8_t)LW(LC_STANDDOWN);
   {
-    /* the feed's telemetry: the busy counts as deltas, the least and most
-     * words moved merged over every install */
-    const uint32_t s = LW(LC_BUSYS), e = LW(LC_BUSYE), n = LW(LC_XN);
-    g_stats.feed_dma_seen |= LW(LC_DMASEEN);
-    g_stats.feed_busy_start += s - g_feed_seen[0];
-    g_stats.feed_busy_end += e - g_feed_seen[1];
-    if (n != g_feed_seen[2]) {
-      const int32_t lo = (int32_t)LW(LC_XMIN), hi = (int32_t)LW(LC_XMAX);
-      if (!g_stats.feed_xfer_n || lo < g_stats.feed_xfer_min)
-        g_stats.feed_xfer_min = lo;
-      if (!g_stats.feed_xfer_n || hi > g_stats.feed_xfer_max)
-        g_stats.feed_xfer_max = hi;
-      g_stats.feed_xfer_n += n - g_feed_seen[2];
+    /* the feed's telemetry, as deltas like the counters above */
+    uint32_t f[6];
+    for (i = 0; i < 6; i++) {
+      const uint32_t v = LW(k_feed_off[i]);
+      f[i] = v - g_feed_seen[i];
+      g_feed_seen[i] = v;
     }
-    g_feed_seen[0] = s;
-    g_feed_seen[1] = e;
-    g_feed_seen[2] = n;
+    g_stats.feed_dma_seen |= LW(LC_DMASEEN);
+    g_stats.feed_busy_start += f[0];
+    g_stats.feed_busy_end += f[1];
+    g_stats.feed_gx_start += f[2];
+    g_stats.feed_gx_end += f[3];
+    g_stats.feed_held += f[4];
+    g_stats.feed_hold_ipc += f[5];
   }
   if (LW(LW_STAGE) == 2 && d[1])
     g_line_used = 1;                           /* our mode 3 went out: the leak watch for good */
@@ -1612,7 +1609,7 @@ void dscm_popup_init(void)
 
 void dscm_popup_set_mode(uint8_t mode)
 {
-  if (mode > DSS_DISPLAY_ON_STRICT)
+  if (mode > DSS_DISPLAY_ON_HOLD)
     return;
   g_mode = mode;
   g_table_mode = 0xFF;                         /* rebuild the table for the new mode */

@@ -73,6 +73,8 @@
 #define DSS_DISPLAY_ON      3            /* pop-ups on screen */
 #define DSS_DISPLAY_ON_REARM 4           /* test: on, and armed again in a frame an IRQ ended the band early */
 #define DSS_DISPLAY_ON_STRICT 5          /* on, but every IRQ ends the band (no IPC interrupt passes) */
+#define DSS_DISPLAY_ON_HOLD 6            /* test: on (line path), and the game's CPU held in our IRQ through the
+                                            band's lines (its geometry FIFO writes stall the bus, starving the feed) */
 
 /* DSS_T_CUE body[0]: what the phone unlocked, so the console can blink its LED */
 #define DSS_CUE_UNLOCK      0
@@ -304,18 +306,17 @@ typedef struct __attribute__((packed)) {
   uint16_t dispmode_fixed; /* GX_DispOff's saved mode found 3 and put back to 1 */
   uint8_t  dispoff;        /* GX_DispOff in the game: 0 looking, 1 found, 2 not found */
   uint8_t  reserved7;
-  /* the line path's feed: what else held the bus while a band was up, and how
-     far the feed got by the VBlank (a FIFO underrun shifts the rest of the
-     band to the right, so a spread between the least and the most means some) */
-  uint32_t feed_dma_seen;  /* channels seen busy at a band's start or its VBlank (bits): 0-3 DMA0-3, 4-7 NDMA0-3
-                              (bit 6 never: NDMA2 is ours), 8-11 DMA0-3 feeding the geometry FIFO */
-  uint32_t feed_busy_start;/* bands that started with another channel busy */
-  uint32_t feed_busy_end;  /* bands that reached the VBlank with another channel busy */
-  uint32_t feed_xfer_n;    /* bands measured at the VBlank (whole bands of the stage on only) */
-  int32_t  feed_xfer_min;  /* words the feed had moved by the VBlank, minus the band's rows x 128: the least */
-  int32_t  feed_xfer_max;  /* and the most: below 0 means NDMA2SAD doesn't count up (no measurement); 0 or
-                              more means it does, and a min well below the max means underruns */
-  uint32_t feed_gcnt;      /* NDMAGCNT when the line path went up: bit 31 round robin, 16-19 its CPU cycles */
+  /* the line path's feed: what else used the bus around a band (a FIFO
+     underrun shifts the rest of the band to the right), and the hold test */
+  uint32_t feed_dma_seen;  /* seen busy at a band's start or its VBlank (bits): 0-3 DMA0-3, 4-7 NDMA0-3 (6 never:
+                              NDMA2 is ours), 8-11 DMA0-3 feeding the geometry FIFO, 12 the geometry engine,
+                              13 its command FIFO not empty, 14 that FIFO half full or more */
+  uint32_t feed_busy_start;/* bands that started with another DMA channel busy */
+  uint32_t feed_busy_end;  /* bands that reached the VBlank with one busy */
+  uint32_t feed_gx_start;  /* bands that started with the geometry engine busy or its FIFO not empty */
+  uint32_t feed_gx_end;    /* bands that reached the VBlank so */
+  uint32_t feed_held;      /* bands with the game's CPU held to their end (DSS_DISPLAY_ON_HOLD) */
+  uint32_t feed_hold_ipc;  /* holds ended early: an IPC sync was due (nds-bootstrap's menu or reset) */
 } dss_display_status_t;    /* 164; the skips count frames, once per reason */
 
 /* After dss_display_status_t: the Wi-Fi link through the ARM7 shim (the

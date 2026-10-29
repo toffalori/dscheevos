@@ -453,9 +453,13 @@ dscm_dtcm_base:
 	.equ	C_DMASEEN, 208              @ telemetry: channels seen busy at a band's start or VBlank (dma_busy bits)
 	.equ	C_BUSYS, 212                @ bands that started with another channel busy
 	.equ	C_BUSYE, 216                @ bands that reached the VBlank with another channel busy
-	.equ	C_XMIN, 220                 @ the feed's words moved by the VBlank minus rows x 128: the least (signed;
-	.equ	C_XMAX, 224                 @ popup.c starts them at INT32_MAX / INT32_MIN), the most,
-	.equ	C_XN, 228                   @ and the bands measured (stage on only)
+	.equ	L_HOLD, 232                 @ popup.c: 1 = hold the game's CPU through the band's lines (on stage)
+	.equ	C_HELD, 236                 @ bands held to their end
+	.equ	C_HOLDIPC, 240              @ holds ended early for an IPC sync
+	.equ	C_GXS, 244                  @ bands that started with the geometry engine busy or its FIFO not empty
+	.equ	C_GXE, 248                  @ bands that reached the VBlank so
+	.equ	HOLD_MAX, 2048              @ hold loop passes (about 2.4 us each: the band's 32 lines take ~850)
+	.equ	HOLD_PAUSE, 32              @ register-only loops between the hold's I/O reads, off the bus
 	.equ	SPIN_MAX, 4096
 	.equ	REASSERT_MAX, 64            @ the game keeps turning our VCOUNT IRQ off: leave it to the game
 
@@ -732,7 +736,8 @@ band_down:
 
 @ Telemetry: the channels other than our feed that are busy now, in r0 as
 @ C_DMASEEN's bits (0-3 DMA0-3, 4-7 NDMA0-3 without our NDMA2, 8-11 DMA0-3 in
-@ geometry-FIFO mode). r12 = 0x04000000; r1, r2 change.
+@ geometry-FIFO mode), and the geometry engine (12 busy, 13 its command FIFO
+@ not empty, 14 half full or more). r12 = 0x04000000; r1, r2 change.
 dma_busy:
 	mov	r0, #0
 	ldr	r1, [r12, #0xB8]            @ DMA0CNT
@@ -773,6 +778,14 @@ dma_busy:
 	ldr	r1, [r2, #0x70]             @ NDMA3CNT
 	tst	r1, #0x80000000
 	orrne	r0, r0, #0x080
+	add	r2, r12, #0x600
+	ldr	r1, [r2]                    @ GXSTAT
+	tst	r1, #0x08000000             @ the geometry engine busy
+	orrne	r0, r0, #0x1000
+	tst	r1, #0x04000000             @ its command FIFO empty? else
+	orreq	r0, r0, #0x2000
+	tst	r1, #0x02000000             @ less than half full? else
+	orreq	r0, r0, #0x4000
 	bx	lr
 
 line_vcount:
@@ -935,10 +948,49 @@ line_vcount:
 	ldr	r1, [r3, #C_DMASEEN]
 	orr	r1, r1, r0
 	str	r1, [r3, #C_DMASEEN]
-	cmp	r0, #0
+	tst	r0, #0xFF                   @ a DMA channel
+	tsteq	r0, #0xF00
 	ldrne	r1, [r3, #C_BUSYS]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_BUSYS]
+	tst	r0, #0x3000                 @ the geometry engine at work
+	ldrne	r1, [r3, #C_GXS]
+	addne	r1, r1, #1
+	strne	r1, [r3, #C_GXS]
+	@ the hold test (DSS_DISPLAY_ON_HOLD): the game's CPU kept here, off the
+	@ bus, until the band is drawn, so its writes to a full geometry FIFO
+	@ can't stall the bus under our feed. An IPC sync ends it early.
+	ldr	r1, [r3, #L_STAGE]
+	cmp	r1, #2
+	bne	line_chain
+	ldr	r1, [r3, #L_HOLD]
+	cmp	r1, #0
+	beq	line_chain
+	mov	r2, #HOLD_MAX
+1:	mov	r1, #HOLD_PAUSE
+2:	subs	r1, r1, #1
+	bne	2b
+	ldrh	r1, [r12, #6]               @ VCOUNT
+	cmp	r1, #192
+	bhs	3f                          @ the band is drawn: the VBlank comes next
+	ldr	r0, [r3, #L_FIRST]
+	sub	r0, r0, #2
+	cmp	r1, r0
+	blo	3f                          @ before the band: a frame went by (never expected)
+	ldr	r1, [r12, #0x214]
+	ldr	r0, [r12, #0x210]
+	and	r1, r1, r0
+	tst	r1, #0x10000                @ IPC sync due: nds-bootstrap's menu or reset must not wait
+	bne	4f
+	subs	r2, r2, #1
+	bne	1b
+3:	ldr	r1, [r3, #C_HELD]
+	add	r1, r1, #1
+	str	r1, [r3, #C_HELD]
+	b	line_chain
+4:	ldr	r1, [r3, #C_HOLDIPC]
+	add	r1, r1, #1
+	str	r1, [r3, #C_HOLDIPC]
 	b	line_chain
 line_late:
 	ldr	r1, [r3, #C_LATE]
@@ -968,10 +1020,15 @@ line_vblank:
 	ldr	r1, [r3, #C_DMASEEN]
 	orr	r1, r1, r0
 	str	r1, [r3, #C_DMASEEN]
-	cmp	r0, #0
+	tst	r0, #0xFF
+	tsteq	r0, #0xF00
 	ldrne	r1, [r3, #C_BUSYE]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_BUSYE]
+	tst	r0, #0x3000
+	ldrne	r1, [r3, #C_GXE]
+	addne	r1, r1, #1
+	strne	r1, [r3, #C_GXE]
 	ldrb	r1, [r12, #2]               @ the band's frame is over: counted, then mode 1 back
 	and	r1, r1, #3
 	ldr	r0, [r3, #L_STAGE]
@@ -991,29 +1048,6 @@ line_vblank:
 1:	ldr	r2, [r3, #C_WHOLE]
 	add	r2, r2, #1
 	str	r2, [r3, #C_WHOLE]
-	cmp	r0, #3                      @ telemetry, whole bands of the on stage only (dry: the FIFO
-	bne	3f                          @ isn't drained; a cut band stops draining it early)
-	add	r2, r12, #0x4100
-	ldr	r1, [r2, #0x40]             @ NDMA2DAD: still ours (feeds DISP_MMEM_FIFO)?
-	sub	r1, r1, #0x04000000
-	cmp	r1, #0x68
-	bne	3f
-	ldr	r0, [r2, #0x3C]             @ NDMA2SAD: how far our feed got, should the register count up
-	ldr	r1, [r3, #L_SRC]
-	sub	r0, r0, r1
-	asr	r0, r0, #2                  @ words moved
-	ldr	r1, [r3, #L_FIRST]
-	rsb	r1, r1, #192                @ the band's rows
-	sub	r0, r0, r1, lsl #7          @ minus rows x 128
-	ldr	r1, [r3, #C_XMIN]
-	cmp	r0, r1
-	strlt	r0, [r3, #C_XMIN]
-	ldr	r1, [r3, #C_XMAX]
-	cmp	r0, r1
-	strgt	r0, [r3, #C_XMAX]
-	ldr	r1, [r3, #C_XN]
-	add	r1, r1, #1
-	str	r1, [r3, #C_XN]
 3:	bl	band_down
 2:	ldr	r1, [r3, #L_NFIRST]         @ the next frame's band, latched
 	str	r1, [r3, #L_FIRST]
