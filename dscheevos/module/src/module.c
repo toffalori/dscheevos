@@ -1075,6 +1075,23 @@ WAKE_CODE int module_idle(int idle_loop)
  * after the network work if an IRQ ended it meanwhile (popup.c).
  * Always returns 0, so the game's own OS_Halt runs after. */
 static uint32_t g_status_frame;   /* frame of the last STATUS */
+
+/* Native cart mode: the game reads its own cartridge, so no card read reaches
+ * nds-bootstrap's ARM9 engine, which is where it puts its IPC sync IRQ back
+ * into IE when a game cleared it (the in-game menu and resets ride on that
+ * IRQ). Do it here once a frame instead. IPC_SYNC bit 14 set means the engine
+ * asked for that IRQ. */
+#define REG_IPC_SYNC (*(volatile uint16_t*)0x04000180)
+static void ipc_sync_keep(void)
+{
+  uint32_t cpsr;
+  if (!(g_boot.flags & DSCM_BOOT_CART_NATIVE) || !(REG_IPC_SYNC & 0x4000) || (REG_IE & 0x10000))
+    return;
+  cpsr = dscm_irq_off();
+  REG_IE |= 0x10000;
+  dscm_irq_restore(cpsr);
+}
+
 int module_idle(int idle_loop)
 {
   uint32_t c;
@@ -1092,6 +1109,7 @@ int module_idle(int idle_loop)
   if (c != dscm_irq.last_vblank) {
     dscm_irq.last_vblank = c;
     dscm_irq.frames = c;
+    ipc_sync_keep();
     if (H.net_started) {
       net_service(dscm_millis());
       dscm_g_status.net_state = net_state();

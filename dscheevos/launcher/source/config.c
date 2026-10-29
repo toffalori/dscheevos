@@ -53,6 +53,7 @@ static void on_setting(const char* key, const char* value, void* ud)
   else if (!strcmp(key, "SKIP_UNOFFICIAL")) s->skip_unofficial = atoi(value) != 0;
   else if (!strcmp(key, "STREAM")) s->stream = atoi(value) != 0;
   else if (!strcmp(key, "CART")) s->cart = atoi(value) != 0;
+  else if (!strcmp(key, "CART_NATIVE")) s->cart_engine = atoi(value) == 0;
   else if (!strcmp(key, "HOST")) copy(s->host, sizeof(s->host), value);
 }
 
@@ -83,6 +84,8 @@ int settings_save(const dsc_settings_t* s)
     fprintf(f, "STREAM = 1\n");
   if (s->cart)
     fprintf(f, "CART = 1\n");
+  if (s->cart_engine)
+    fprintf(f, "CART_NATIVE = 0\n");
   fclose(f);
   return 1;
 }

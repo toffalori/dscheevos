@@ -411,6 +411,7 @@ int main(int argc, char** argv)
      * hashes the cartridge itself. A cart session is a stream session. */
     static uint8_t header[0x200] __attribute__((aligned(4)));
     settings.stream = 1;
+    log_line("cart: %s card reads", settings.cart_engine ? "engine" : "native");
     bootstrap_ini_game(rom_path, sizeof(rom_path), &dsi_mode);   /* for DSI_MODE only */
     ui_status("Reading the cartridge...");
     while (!cart_read_header(header)) {
