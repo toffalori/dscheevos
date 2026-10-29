@@ -180,12 +180,16 @@ int wpa_rx(wpa_ctx_t* w, const uint8_t* eapol, uint32_t len, const uint8_t snonc
     return WPA_IGNORED;
 
   if ((info & KI_PAIRWISE) && !(info & KI_MIC)) {
-    /* message 1: answer with our nonce and the RSN IE we associated with */
+    /* message 1: answer with our nonce and the RSN IE we associated with.
+     * The AP repeats message 1 while it waits for message 2; our nonce stays
+     * the same until message 3 ends the handshake, so whichever of our
+     * answers the AP takes, its PTK is ours. */
     static const uint8_t rsn_ccmp[] = {0x30, 0x14, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F,
                                        0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, 0x00, 0x00};
     uint8_t* r;
     memcpy(w->anonce, eapol + 17, 32);
-    memcpy(w->snonce, snonce, 32);
+    if (!w->pending_valid)
+      memcpy(w->snonce, snonce, 32);
     derive_ptk(w);
     r = reply(eapol, 2 | KI_PAIRWISE | KI_MIC, sizeof(rsn_ccmp), out);
     memcpy(r + 17, w->snonce, 32);
@@ -197,8 +201,19 @@ int wpa_rx(wpa_ctx_t* w, const uint8_t* eapol, uint32_t len, const uint8_t snonc
 
   if (info & KI_PAIRWISE) {
     /* message 3: proves the AP has the PMK; carries the GTK */
-    if (!w->pending_valid || !(info & KI_INSTALL) || memcmp(eapol + 17, w->anonce, 32) != 0
-        || !mic_ok(w->pending, eapol, flen))
+    if (!(info & KI_INSTALL) || memcmp(eapol + 17, w->anonce, 32) != 0)
+      return WPA_IGNORED;
+    if (!w->pending_valid) {
+      /* repeated after our message 4 was lost: answer again under the keys
+       * we hold, which the AP will install when this answer arrives */
+      if (!w->ptk_valid || !mic_ok(w->kck, eapol, flen))
+        return WPA_IGNORED;
+      memcpy(w->replay, eapol + 9, 8);
+      reply(eapol, 2 | KI_PAIRWISE | KI_MIC | KI_SECURE, 0, out);
+      calc_mic(w->kck, out->eapol, out->eapol_len, out->eapol + 81);
+      return WPA_REPLY;
+    }
+    if (!mic_ok(w->pending, eapol, flen))
       return WPA_IGNORED;
     memcpy(w->kck, w->pending, 16);
     memcpy(w->kek, w->pending + 16, 16);

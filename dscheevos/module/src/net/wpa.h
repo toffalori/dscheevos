@@ -50,7 +50,9 @@ enum {
 void wpa_begin(wpa_ctx_t* w, const uint8_t pmk[32], const uint8_t own[6], const uint8_t ap[6], uint8_t group_cipher);
 
 /* One EAPOL frame from the AP (ethertype 0x888E payload). snonce is fresh
- * randomness, used only if this is message 1. */
+ * randomness, used only if this is message 1 of a new handshake (a repeat
+ * of message 1 keeps the nonce already answered with). A repeat of message 3
+ * after our message 4 was lost gets message 4 again, with no keys to load. */
 int wpa_rx(wpa_ctx_t* w, const uint8_t* eapol, uint32_t len, const uint8_t snonce[32], wpa_out_t* out);
 
 /* Exposed for the tests. */

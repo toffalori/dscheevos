@@ -27,6 +27,7 @@
  * module_idle below. */
 void dscm_stream_start(const char* hash, const char* game_code, const char* title, int dtcm_known);
 void dscm_stream_set_phone(uint32_t ip);
+void dscm_stream_record(void* ring, uint32_t size, uint32_t seed);
 int dscm_stream_net_init(void);
 void dscm_stream_service(uint32_t now_ms);
 void dscm_stream_frame(uint32_t frame);
@@ -804,6 +805,15 @@ int module_init(const dscm_boot_t* boot)
   if (dscm_stream_net_init() != 0)
     dscm_g_status.error = DSCM_ERROR_NO_MEMORY;
   dscm_popup_init();
+  {
+    /* The recording's ring: the snapshot arena's place, which the streamer
+     * doesn't use (it loads no set), after the session file. */
+    const uint32_t used = g_boot.file_size > HEAP_SESSION_HEAD ? g_boot.file_size : HEAP_SESSION_HEAD;
+    const uint32_t start = (DSCM_SESSION + used + DSS_REC_SECTOR - 1) & ~(DSS_REC_SECTOR - 1);
+    if (start < HEAP_ZONE_END)
+      dscm_stream_record((void*)DSCM_DATA_ADDR(start), HEAP_ZONE_END - start,
+                         g_boot.unix_time ^ dscm_vblank_count_read() ^ (uint32_t)g_boot.mac[5] << 8);
+  }
 #else
   /* nothing reads the session's replies or CA from here on */
   heap_release_session();

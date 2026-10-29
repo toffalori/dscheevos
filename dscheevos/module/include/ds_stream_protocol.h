@@ -40,6 +40,9 @@
 #define DSS_T_READY         0x89   /* phone answers a launcher's HELLO (dss_ready_t): it will pair once the game runs */
 #define DSS_T_POPUP         0x8A   /* a pop-up for the console's own screen (dss_popup_t + strings) */
 #define DSS_T_BADGE         0x8B   /* a chunk of a pop-up's badge pixels (dss_badge_t + data) */
+#define DSS_T_REPLAY_DATA   0x07   /* console: a piece of its recording (dss_replay_data_t + bytes) */
+#define DSS_T_REPLAY_REQ    0x8C   /* phone asks for a piece of the console's recording (dss_replay_req_t) */
+#define DSS_T_REPLAY_DONE   0x8D   /* phone evaluated the recording up to an offset (dss_replay_done_t) */
 
 #define DSS_MAX_TABLE_WORDS 1024
 #define DSS_TABLE_CHUNK     256
@@ -56,6 +59,9 @@
 #define DSS_CAP_DTCM        0x01
 #define DSS_CAP_LAUNCHER    0x02         /* HELLO from the launcher before the game: answer READY, don't pair */
 #define DSS_CAP_POPUP       0x04         /* the console draws pop-ups on its screen (POPUP, BADGE, CTRL_DISPLAY) */
+#define DSS_CAP_RECORD      0x08         /* the console records the watched words and replays them (REPLAY_*);
+                                            HELLO's run is its recording's run id. From a launcher: it holds a
+                                            recording of an earlier run on the SD card (run, and the hash in HELLO) */
 
 #define DSS_FRAME_FULL      0x01
 #define DSS_FRAME_STALE     0x02
@@ -94,12 +100,83 @@ typedef struct __attribute__((packed)) {
   uint8_t  reserved;
   uint16_t max_table_words;
   uint16_t max_chain_nodes;
-  uint16_t reserved2;
+  uint16_t run;            /* DSS_CAP_RECORD: the recording's run id (random, nonzero, new each game start); else 0 */
   uint32_t vblank;
   char     hash[32];       /* lowercase hex, no terminator */
   char     game_code[4];
   char     title[12];
 } dss_hello_t;             /* 60 */
+
+/* ---- the recording (DSS_CAP_RECORD) ----
+ * The console records every frame's changes of the watched words, always,
+ * into a ring in RAM (and the ARM7 mirrors it into sd:/_nds/dscheevos/
+ * recording.bin), so the phone can replay what it missed: after a drop of
+ * the link (the same run), or after the run ended without it (the launcher
+ * offers the SD copy at its next start). A byte stream of records,
+ * little-endian; offsets count from the stream's start (the run's first
+ * byte) and never wrap:
+ *   SEGMENT  u32 magic DSS_REC_MAGIC, u16 count, u16 generation, u32 frame,
+ *            u32 address[count] (RA addresses, table order), u32 value[count]
+ *            (every word's value at `frame`: a keyframe). Applied without
+ *            evaluating. Starts sector-aligned (DSS_REC_SECTOR): PAD bytes
+ *            fill the rest of the sector before it.
+ *   FRAME    u8 n (0..DSS_REC_FRAME_MAX), u8 advance (VBlanks since the last
+ *            record's frame, 1..255), n x (u16 index, u32 value). One
+ *            evaluated frame, like one live FRAME packet: the values set,
+ *            then the achievements checked.
+ *   FRAME16  DSS_REC_FRAME16, u16 n, u16 advance, n x (u16 index, u32 value).
+ *   PAD      DSS_REC_PAD (to the end of the sector).
+ * A new segment starts with every new table, every DSS_REC_SEGMENT_FRAMES
+ * frames, and after a gap in the recording. */
+#define DSS_REC_MAGIC          0x43455253u  /* "SREC" */
+#define DSS_REC_SECTOR         512u
+#define DSS_REC_FRAME_MAX      0xFCu
+#define DSS_REC_FRAME16        0xFDu
+#define DSS_REC_PAD            0xFFu
+#define DSS_REC_SEGMENT_FRAMES 600u
+
+/* REPLAY_REQ: stream 0 starts a replay: the console picks the latest segment
+ * at or before from_frame (the first frame the phone hasn't evaluated) and
+ * stops sending live FRAMEs until REPLAY_DONE reaches the stream's end (or
+ * DSS_REPLAY_TIMEOUT_MS pass without a REQ). Else: more of `stream` from
+ * `offset` (bytes from the stream's start). Answered by REPLAY_DATA. */
+typedef struct __attribute__((packed)) {
+  uint16_t run;            /* the recording asked for (HELLO's run) */
+  uint16_t max_len;        /* bytes wanted in this piece (at most DSS_REPLAY_CHUNK) */
+  uint32_t from_frame;     /* stream 0: the first frame the phone hasn't evaluated (0: from the oldest) */
+  uint32_t stream;         /* 0, or the stream offset of the replay's first segment (REPLAY_DATA's stream) */
+  uint32_t offset;         /* bytes from `stream` */
+} dss_replay_req_t;        /* 16 */
+
+#define DSS_REPLAY_CHUNK       1024u
+#define DSS_REPLAY_TIMEOUT_MS  3000u
+
+#define DSS_REPLAY_GAP   0x01  /* recorded frames before the first segment sent were overwritten: some are lost */
+#define DSS_REPLAY_NONE  0x02  /* no recording (or not this run): nothing to replay */
+#define DSS_REPLAY_END   0x04  /* this piece reaches the end of what is recorded so far */
+
+typedef struct __attribute__((packed)) {
+  uint16_t run;
+  uint8_t  flags;          /* DSS_REPLAY_* */
+  uint8_t  reserved;
+  uint32_t stream;         /* the stream offset of the replay's first segment */
+  uint32_t offset;         /* this piece's bytes start here (from `stream`) */
+  uint32_t avail;          /* bytes recorded from `stream` to now */
+  uint32_t end_frame;      /* the frame of the last record so far */
+  uint16_t len;            /* bytes that follow */
+  uint16_t reserved2;
+  /* uint8_t data[len] */
+} dss_replay_data_t;       /* 24 */
+
+/* REPLAY_DONE: the phone evaluated `stream` up to `offset`. If that is the
+ * end of the recording, the console sends live FRAMEs again, as DELTAs from
+ * the values the phone now has; else it answers with more REPLAY_DATA. */
+typedef struct __attribute__((packed)) {
+  uint16_t run;
+  uint16_t reserved;
+  uint32_t stream;
+  uint32_t offset;
+} dss_replay_done_t;       /* 12 */
 
 typedef struct __attribute__((packed)) {
   uint16_t generation;

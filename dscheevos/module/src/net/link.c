@@ -10,11 +10,12 @@
  *
  * Rejoining: the launcher's dswifi did the WPA2 handshake, so its keys are
  * unknown here. When the AP drops us, or starts a group rekey we can't
- * answer, we reassociate with WMI_CONNECT and run the 4-way handshake
- * ourselves (wpa.c) with the PMK nds-bootstrap read from the console's saved
- * settings; later group rekeys are then answered in place. Commands and
- * EAPOL frames wait in a small queue, since the shim moves one frame per
- * VBlank and the ring has room for four.
+ * answer, we settle the firmware with WMI_DISCONNECT, reassociate with
+ * WMI_CONNECT and run the 4-way handshake ourselves (wpa.c) with the PMK
+ * nds-bootstrap read from the console's saved settings; later group rekeys
+ * are then answered in place (the state machine is described above
+ * can_rejoin). Commands and EAPOL frames wait in a small queue, since the
+ * shim moves one frame per VBlank and the ring has room for four.
  *
  * Cache: the ring sits in cached RAM. Lines the ARM9 writes are cleaned
  * after writing; lines the ARM7 writes are invalidated before reading.
@@ -33,12 +34,17 @@
 #include <stddef.h>
 #include <string.h>
 
-#define WMI_CONNECT_CMD        0x0001
-#define WMI_DISCONNECT_CMD     0x0003
-#define WMI_SYNCHRONIZE_CMD    0x0004
-#define WMI_ADD_CIPHER_KEY_CMD 0x0016
-#define WMI_CONNECT_EVENT      0x1002
-#define WMI_DISCONNECT_EVENT   0x1003
+#define WMI_CONNECT_CMD            0x0001
+#define WMI_DISCONNECT_CMD         0x0003
+#define WMI_SYNCHRONIZE_CMD        0x0004
+#define WMI_SET_SCAN_PARAMS_CMD    0x0008
+#define WMI_SET_BSS_FILTER_CMD     0x0009
+#define WMI_SET_CHANNEL_PARAMS_CMD 0x0011
+#define WMI_ADD_CIPHER_KEY_CMD     0x0016
+#define WMI_CONNECT_EVENT          0x1002
+#define WMI_DISCONNECT_EVENT       0x1003
+#define WMI_CMD_ERROR_EVENT        0x1005
+#define DISC_REASON_CMD 3        /* the firmware's reason for a disconnect we asked for */
 #define HTC_EP_WMI  1
 #define HTC_EP_DATA 2
 
@@ -47,6 +53,9 @@
 #define LEAVE_TIMEOUT_MS 1000    /* our WMI_DISCONNECT to its event */
 #define BACKOFF_MIN_MS   1000
 #define BACKOFF_MAX_MS   30000
+
+/* Association bookkeeping runs rarely: out of the hot code (hot-layout.ref). */
+#define DSCM_COLD __attribute__((section(".text_cold"), noinline))
 
 static shim_shared_t g_ring;     /* aligned to cache lines by SHIM_LINE */
 static struct netif g_netif;
@@ -57,6 +66,9 @@ static uint32_t g_rx_frames, g_tx_frames, g_tx_drops;
 static uint32_t g_disc_events, g_connect_events;
 static uint16_t g_cause_proto, g_last_proto;
 static uint8_t  g_cause_reason, g_last_reason, g_join_timeouts, g_key_timeouts, g_need_ptk;
+/* the firmware refusing a command (WMI_CMD_ERROR_EVENT): command id | code << 16; no
+ * field in dss_link_status_t yet, a refused WMI_CONNECT counts as a join timeout */
+static uint32_t g_cmd_errors, g_last_cmd_error;
 
 /* association: the launcher's to start with, ours after a rejoin */
 enum { J_UP, J_LEAVING, J_WAITING, J_JOINING, J_KEYING, J_GIVEN_UP };
@@ -65,8 +77,9 @@ static uint32_t g_now, g_deadline, g_backoff = BACKOFF_MIN_MS;
 static uint32_t g_rejoins;
 static wpa_ctx_t g_wpa;
 
-/* frames we make ourselves (WMI commands, EAPOL), ahead of lwIP's */
-#define CTRL_SLOTS 8
+/* frames we make ourselves (WMI commands, EAPOL), ahead of lwIP's: a join
+ * queues four, message 3's answer six, and the shim takes one a VBlank */
+#define CTRL_SLOTS 16
 #define CTRL_MAX   256
 static struct { uint32_t len; uint8_t data[CTRL_MAX]; } g_ctrl[CTRL_SLOTS];
 static uint32_t g_ctrl_head, g_ctrl_tail;
@@ -280,7 +293,23 @@ static err_t netif_setup(struct netif* netif)
   return ERR_OK;
 }
 
-/* ---- association ---- */
+/* ---- association ----
+ *
+ * The firmware's side of it (ath6kl, which drives the same WMI): after a
+ * disconnect it did not ask for (lost beacons, a deauth from the AP, a failed
+ * attempt) it keeps trying to reconnect by itself, and a WMI_CONNECT sent
+ * meanwhile is refused (WMI_CMD_ERROR_EVENT, illegal state). Only a
+ * WMI_DISCONNECT settles it, answered by one more disconnect event with
+ * reason 3. So every path to a new association goes through J_LEAVING, and
+ * every disconnect event we did not ask for is answered with a disconnect
+ * command. The connect itself repeats the settings dswifi sends before its
+ * WMI_CONNECT (the AP's channel, a connect scan, the beacon filter) in case
+ * the firmware dropped them with the association.
+ *
+ *   J_UP ----drop / group rekey----> J_LEAVING --event 3--> J_WAITING
+ *   J_WAITING --backoff--> J_JOINING --connect event--> J_KEYING --m3--> J_UP
+ *   J_JOINING / J_KEYING --timeout, refusal, drop--> J_LEAVING (backoff doubled)
+ */
 
 static int can_rejoin(void)
 {
@@ -291,7 +320,7 @@ static int can_rejoin(void)
   return g_config.ap_security == DSCM_AP_WPA2 && g_config.pmk_valid;
 }
 
-static void set_up(int up)
+static DSCM_COLD void set_up(int up)
 {
   if (up == g_connected)
     return;
@@ -307,8 +336,14 @@ static void set_up(int up)
   }
 }
 
-/* try again after a pause that doubles with each failure */
-static void wait_then_join(void)
+/* an attempt failed: the next one waits twice as long */
+static DSCM_COLD void attempt_failed(void)
+{
+  g_backoff = g_backoff * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : g_backoff * 2;
+}
+
+/* join after the current pause */
+static DSCM_COLD void wait_then_join(void)
 {
   set_up(0);
   if (!can_rejoin()) {
@@ -317,14 +352,33 @@ static void wait_then_join(void)
   }
   g_join = J_WAITING;
   g_deadline = g_now + g_backoff;
-  g_backoff = g_backoff * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : g_backoff * 2;
 }
 
-static void join(void)
+static DSCM_COLD void join(void)
 {
   uint8_t c[55];
   uint32_t mhz = g_config.ap_channel == 14 ? 2484 : 2407 + 5u * g_config.ap_channel;
   int wpa2 = g_config.ap_security == DSCM_AP_WPA2;
+
+  /* as dswifi before its WMI_CONNECT: beacons of the current BSS only, a
+   * connect scan (flags 5: for a connection, active), the AP's channel */
+  memset(c, 0, sizeof(c));
+  c[0] = 4;
+  wmi_cmd(WMI_SET_BSS_FILTER_CMD, c, 8);
+  memset(c, 0, sizeof(c));
+  c[0] = c[1] = c[2] = c[3] = c[4] = c[5] = 0xFF;    /* fg start, fg end, bg period: never */
+  c[6] = 200; c[8] = 200;                            /* max active, passive dwell (ms) */
+  c[10] = 3;                                         /* short scan ratio */
+  c[11] = 5;                                         /* scan control flags */
+  c[12] = 200;                                       /* min active dwell */
+  wmi_cmd(WMI_SET_SCAN_PARAMS_CMD, c, 20);
+  memset(c, 0, sizeof(c));
+  c[2] = 3;                                          /* 11a/g phy mode, as dswifi */
+  c[3] = 1;
+  c[4] = (uint8_t)mhz;
+  c[5] = (uint8_t)(mhz >> 8);
+  wmi_cmd(WMI_SET_CHANNEL_PARAMS_CMD, c, 6);
+
   memset(c, 0, sizeof(c));
   c[0] = 1;                                 /* infrastructure */
   c[1] = 1;                                 /* open system 802.11 auth */
@@ -342,7 +396,8 @@ static void join(void)
   g_deadline = g_now + JOIN_TIMEOUT_MS;
 }
 
-static void leave_then_join(void)
+/* settle the firmware with a disconnect; its event (reason 3) starts the pause */
+static DSCM_COLD void leave_then_join(void)
 {
   set_up(0);
   if (!can_rejoin()) {
@@ -354,15 +409,15 @@ static void leave_then_join(void)
   g_deadline = g_now + LEAVE_TIMEOUT_MS;
 }
 
-/* an attempt that stalled: drop it and try again later */
-static void abandon_attempt(void)
+/* an attempt that stalled or was refused: drop it, pause longer, try again */
+static DSCM_COLD void abandon_attempt(void)
 {
-  wmi_cmd(WMI_DISCONNECT_CMD, NULL, 0);
-  wait_then_join();
+  attempt_failed();
+  leave_then_join();
 }
 
 /* keys in, as dswifi does after its handshake */
-static void keys_done(const wpa_out_t* o, int pairwise)
+static DSCM_COLD void keys_done(const wpa_out_t* o, int pairwise)
 {
   uint8_t one = 1;
   if (pairwise) {
@@ -377,20 +432,27 @@ static void keys_done(const wpa_out_t* o, int pairwise)
     wmi_cmd(WMI_SYNCHRONIZE_CMD, &one, 1);
 }
 
-static void handle_eapol(const uint8_t* src, const uint8_t* eapol, uint32_t len)
+static DSCM_COLD void handle_eapol(const uint8_t* src, const uint8_t* eapol, uint32_t len)
 {
   static wpa_out_t o;
   uint8_t snonce[32];
   int r;
   if (g_config.ap_security != DSCM_AP_WPA2 || !g_config.pmk_valid)
     return;                       /* no key: leave the launcher's association as it is */
+  if (g_join == J_LEAVING || g_join == J_WAITING || g_join == J_JOINING) {
+    /* the AP talks to us, so an association exists whose connect event we
+     * missed (or the firmware made it by itself): start the handshake fresh */
+    wpa_begin(&g_wpa, g_config.pmk, g_config.mac, src, g_config.ap_group_cipher);
+    g_join = J_KEYING;
+    g_deadline = g_now + KEY_TIMEOUT_MS;
+  }
   entropy_bytes(snonce, 32);
   r = wpa_rx(&g_wpa, eapol, len, snonce, &o);
   if (r == WPA_REPLY) {
     send_eapol(src, o.eapol, o.eapol_len);
     if (o.install_ptk || o.install_gtk)
       keys_done(&o, o.install_ptk);
-    if (o.install_ptk && g_join == J_KEYING)
+    if (o.install_ptk && !g_connected)
       set_up(1);
   } else if (r == WPA_NEED_PTK && g_join == J_UP) {
     if (g_need_ptk < 0xFF)
@@ -403,27 +465,73 @@ static void handle_eapol(const uint8_t* src, const uint8_t* eapol, uint32_t len)
   memset(snonce, 0, sizeof(snonce));
 }
 
+/* a deadline passed (link_service) */
+static DSCM_COLD void join_deadline(void)
+{
+  switch (g_join) {
+  case J_WAITING:
+    join();
+    break;
+  case J_LEAVING:                 /* no event for our disconnect: go on anyway */
+    wait_then_join();
+    break;
+  case J_JOINING:
+    if (g_join_timeouts < 0xFF)
+      g_join_timeouts++;
+    abandon_attempt();
+    break;
+  case J_KEYING:
+    if (g_key_timeouts < 0xFF)
+      g_key_timeouts++;
+    abandon_attempt();
+    break;
+  default:
+    break;
+  }
+}
+
 /* ---- RX ---- */
 
-static void handle_wmi(uint16_t id, const uint8_t* p, uint32_t len)
+static DSCM_COLD void handle_wmi(uint16_t id, const uint8_t* p, uint32_t len)
 {
   if (id == WMI_DISCONNECT_EVENT) {
     /* protocol reason/status (2), BSSID (6), the firmware's reason (1) */
+    int asked = 0;
     g_disc_events++;
     if (len >= 9) {
       g_last_proto = (uint16_t)(p[0] | (p[1] << 8));
       g_last_reason = p[8];
+      asked = g_last_reason == DISC_REASON_CMD;
       if (g_join == J_UP && g_connected) {
         g_cause_proto = g_last_proto;   /* this one took the link down */
         g_cause_reason = g_last_reason;
       }
     }
-    if (g_join == J_LEAVING)
-      join();
-    else if (g_join != J_GIVEN_UP && g_join != J_WAITING)
+    switch (g_join) {
+    case J_LEAVING:               /* settled (ours, or one that crossed ours) */
       wait_then_join();
-    else
+      break;
+    case J_JOINING:
+    case J_KEYING:                /* the attempt failed */
+      attempt_failed();
+      if (asked)
+        wait_then_join();
+      else
+        leave_then_join();
+      break;
+    case J_WAITING:
+    case J_GIVEN_UP:
       set_up(0);
+      if (!asked && g_join == J_WAITING)
+        leave_then_join();        /* the firmware's own attempts: settle it, keep the pause */
+      break;
+    default:                      /* J_UP: the association went */
+      if (asked)
+        wait_then_join();
+      else
+        leave_then_join();
+      break;
+    }
   } else if (id == WMI_CONNECT_EVENT) {
     const uint8_t* bssid = len >= 8 ? p + 2 : g_config.ap_bssid;
     g_connect_events++;
@@ -443,6 +551,16 @@ static void handle_wmi(uint16_t id, const uint8_t* p, uint32_t len)
       data_sync();
       wmi_cmd(WMI_SYNCHRONIZE_CMD, &one, 1);
       set_up(1);
+    }
+  } else if (id == WMI_CMD_ERROR_EVENT && len >= 3) {
+    /* command id (2), error code (1): 1 bad parameter, 2 illegal state */
+    uint16_t cmd = (uint16_t)(p[0] | (p[1] << 8));
+    g_cmd_errors++;
+    g_last_cmd_error = cmd | ((uint32_t)p[2] << 16);
+    if (cmd == WMI_CONNECT_CMD && g_join == J_JOINING) {
+      if (g_join_timeouts < 0xFF)
+        g_join_timeouts++;        /* refused: no connect event will come */
+      abandon_attempt();
     }
   }
 }
@@ -555,19 +673,8 @@ void link_service(uint32_t now_ms)
   g_now = now_ms;
   pump_rx();
   ctrl_flush();
-  if ((int32_t)(g_now - g_deadline) >= 0) {
-    if (g_join == J_WAITING || g_join == J_LEAVING) {
-      join();
-    } else if (g_join == J_JOINING || g_join == J_KEYING) {
-      if (g_join == J_JOINING) {
-        if (g_join_timeouts < 0xFF)
-          g_join_timeouts++;
-      } else if (g_key_timeouts < 0xFF) {
-        g_key_timeouts++;
-      }
-      abandon_attempt();
-    }
-  }
+  if (g_join != J_UP && g_join != J_GIVEN_UP && (int32_t)(g_now - g_deadline) >= 0)
+    join_deadline();
   sys_check_timeouts();
 }
 
@@ -616,6 +723,8 @@ void link_diag(dss_link_status_t* out)
   out->key_timeouts = g_key_timeouts;
   out->need_ptk = g_need_ptk;
   memset(out->reserved, 0, sizeof(out->reserved));
+  (void)g_cmd_errors;             /* for a later field: how often the firmware refused a command */
+  (void)g_last_cmd_error;
 }
 
 void link_stats(uint32_t* rx, uint32_t* tx, uint32_t* drops)

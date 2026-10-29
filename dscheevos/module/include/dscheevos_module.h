@@ -384,6 +384,30 @@ typedef struct dscm_journal_t {
 #define DSCM_CUE_LEADERBOARD_SHIFT 8
 #define DSCM_CUE_CHALLENGE        0x00010000u   /* a challenge indicator is showing */
 
+/* Cheevotron streamer: the recording's ring (DSS_CAP_RECORD; the record
+ * format is in ds_stream_protocol.h), for the ARM7 to mirror onto the SD
+ * card. The module appends records and advances `written`; the ARM7 copies
+ * every completed DSS_REC_SECTOR of the stream (sector k = stream bytes
+ * k*512..k*512+511, at ring + (k*512 % ring_size)) to the data sector
+ * k % data_sectors of sd:/_nds/dscheevos/recording.bin (created by the
+ * launcher at its full size, its clusters fixed during play), before the
+ * ring overwrites it, and keeps the file's header sector current. The
+ * ring's lines are cleaned to RAM as they complete. */
+#define DSCM_REC_MAGIC 0x43455244u  /* "DREC" */
+typedef struct dscm_rec_t {
+  uint32_t magic;                     /* DSCM_REC_MAGIC */
+  uint32_t ring;                      /* physical address of the ring */
+  uint32_t ring_size;                 /* bytes, a multiple of DSS_REC_SECTOR */
+  uint16_t run;                       /* the run id (HELLO's run) */
+  uint16_t reserved;
+  char     game_hash[32];             /* lowercase hex, no terminator */
+  volatile uint32_t written;          /* stream bytes recorded so far (the ring holds the last ring_size of them) */
+  volatile uint32_t segment;          /* stream offset of the latest segment */
+  volatile uint32_t end_frame;        /* the frame of the last record */
+  volatile uint32_t sd_written;       /* the ARM7: stream bytes on the SD card (whole sectors) */
+  volatile uint32_t sd_skipped;       /* the ARM7: sectors overwritten in the ring before it could write them */
+} dscm_rec_t;
+
 typedef struct dscm_header_t {
   uint32_t magic;
   uint32_t version;
@@ -408,7 +432,8 @@ typedef struct dscm_header_t {
   volatile uint32_t notify_count;     /* 0x40: unlocks so far; own cache line, cleaned to RAM */
   void* net_ring;                     /* 0x44: dscm_shim.h ring, 0 if none; same line */
   volatile uint32_t cues;             /* 0x48: LED cues for the ARM7 (DSCM_CUE_*); same cache line, cleaned to RAM */
-  uint32_t reserved2[5];
+  dscm_rec_t* volatile rec;           /* 0x4C: the streamer's recording (physical address), 0 if none */
+  uint32_t reserved2[4];
   /* 0x60: the VBlank IRQ's own state, then its code (module internals) */
 } dscm_header_t;
 

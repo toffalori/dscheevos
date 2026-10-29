@@ -71,7 +71,7 @@ SRC := src/module.c src/syscalls.c src/heap.c src/fast_strtoul.c $(CORE)/src/dsc
 # evaluating on the console (src/stream.c; module.c swaps its init and idle).
 ifeq ($(STREAM),1)
 CFLAGS += -DDSCM_STREAM -I../display/include
-SRC += src/stream.c src/popup.c
+SRC += src/stream.c src/popup.c src/record.c
 # Pop-ups (src/popup.c): the display library's text mapping, and nds-bootstrap's
 # in-game menu font, generated into gen/ before the build (the devkitARM image
 # has no python): python3 ../display/tools/fontgen.py ../../external/nds-bootstrap

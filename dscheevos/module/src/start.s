@@ -34,7 +34,10 @@ dscm_net_ring:
 	.global dscm_cues
 dscm_cues:
 	.word 0                     @ 0x48: LED cues for the ARM7 (same cache line)
-	.space 20
+	.global dscm_rec_ptr
+dscm_rec_ptr:
+	.word 0                     @ 0x4C: the streamer's recording (dscm_rec_t, physical) for the ARM7
+	.space 16
 
 @ The wake page (module.c wake_page_t): dscm_irq (frame counting and the
 @ wake's flags), g_idle, H and the re-entry guard, the module region's last
@@ -208,6 +211,22 @@ dscm_publish_net_ring:
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c10, 4
 	bx	lr
+
+@ void dscm_publish_rec(void* rec): as above, for the recording (once, at
+@ init: kept out of the hot code).
+	.pushsection .text_cold, "ax"
+	.arm
+	.global dscm_publish_rec
+	.type dscm_publish_rec, %function
+dscm_publish_rec:
+	ldr	r1, =dscm_rec_ptr
+	str	r0, [r1]
+	mcr	p15, 0, r1, c7, c10, 1
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c10, 4
+	bx	lr
+	.ltorg
+	.popsection
 
 @ void dscm_publish_list(void* list): store the list pointer (header 0x2C)
 @ so that it is in RAM and the line is clean.

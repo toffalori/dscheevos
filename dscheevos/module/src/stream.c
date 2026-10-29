@@ -38,6 +38,17 @@ void dscm_popup_set_mode(uint8_t mode);
 void dscm_popup_status(dss_display_status_t* out);
 void dscm_popup_local(const char* title, const char* detail, const char* value);
 
+/* record.c: the recording the phone replays after a drop */
+void dscm_rec_init(void* ring, uint32_t size, uint16_t run, const char* hash);
+dscm_rec_t* dscm_rec_header(void);
+void dscm_rec_frame(uint32_t frame, const uint32_t* addr, uint16_t count, uint16_t generation, const uint8_t* cur);
+uint32_t dscm_rec_written(void);
+uint32_t dscm_rec_end_frame(void);
+const uint8_t* dscm_rec_values(const uint32_t* addr, uint16_t count, uint16_t generation);
+uint32_t dscm_rec_find(uint32_t from_frame, int* gap);
+uint32_t dscm_rec_read(uint32_t abs_offset, uint8_t* out, uint32_t len);
+extern void dscm_publish_rec(void* rec);   /* start.s */
+
 /* ---- state ---- */
 
 static struct udp_pcb* g_pcb;
@@ -69,6 +80,14 @@ static uint32_t  g_last_hello_ms;
 static int       g_force_full;
 static uint32_t  g_lost_ms;            /* when a pairing timed out (0: none since the last) */
 static uint8_t   g_lost_shown;         /* "Phone link lost" notices shown since */
+
+/* the recording: this run's id (HELLO), and a replay the phone is reading */
+static uint16_t  g_run;
+static int       g_recording;          /* the ring is set up */
+static int       g_replaying;          /* live FRAMEs held back until the phone caught up */
+static uint32_t  g_replay_stream;      /* the replay's first segment (stream offset) */
+static uint32_t  g_replay_ms;          /* the phone's last REPLAY_REQ/DONE */
+static uint32_t  g_now_ms;             /* dscm_stream_service's clock, for the receive callback */
 
 /* HELLO payload, filled at start */
 static dss_hello_t g_hello;
@@ -161,13 +180,11 @@ static void read_words(uint8_t* out, uint16_t count)
  * of changes drains over the next few frames instead of being dropped. An
  * all-unchanged frame still sends an empty DELTA, which carries the VBlank
  * count and keeps the pairing alive. */
-static void send_frame(uint32_t frame)
+static void send_frame(uint32_t frame, const uint8_t* cur)
 {
-  static uint8_t cur[DSS_MAX_TABLE_WORDS * 4];
   uint8_t buf[DSS_MAX_PAYLOAD];
   uint16_t n = g_watch_count;
   int fits_full = (DSS_HEADER_SIZE + 10 + (int)n * 4 <= DSS_MAX_PAYLOAD);
-  read_words(cur, n);
 
   if (fits_full && (g_force_full || !g_have_last)) {
     uint8_t* body = header(buf, DSS_T_FRAME, g_session, (uint16_t)(10 + n * 4));
@@ -306,6 +323,93 @@ static void on_control(const uint8_t* body, uint16_t len)
   }
 }
 
+/* ---- replay: the phone reads what it missed from the recording ---- */
+
+static void send_replay(uint8_t flags, uint32_t stream, uint32_t offset, uint16_t max_len)
+{
+  static uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_replay_data_t) + DSS_REPLAY_CHUNK];
+  const uint32_t written = dscm_rec_written();
+  uint8_t* body;
+  uint32_t len = 0;
+  if (max_len > DSS_REPLAY_CHUNK)
+    max_len = DSS_REPLAY_CHUNK;
+  if (!(flags & DSS_REPLAY_NONE)) {
+    len = dscm_rec_read(stream + offset, buf + DSS_HEADER_SIZE + sizeof(dss_replay_data_t), max_len);
+    if (!len && stream + offset < written)
+      flags |= DSS_REPLAY_GAP;         /* already overwritten: the phone starts over */
+    if (stream + offset + len >= written)
+      flags |= DSS_REPLAY_END;
+  }
+  body = header(buf, DSS_T_REPLAY_DATA, g_session, (uint16_t)(sizeof(dss_replay_data_t) + len));
+  put16(body + 0, g_run);
+  body[2] = flags;
+  body[3] = 0;
+  put32(body + 4, stream);
+  put32(body + 8, offset);
+  put32(body + 12, written - stream);
+  put32(body + 16, dscm_rec_end_frame());
+  put16(body + 20, (uint16_t)len);
+  put16(body + 22, 0);
+  send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + sizeof(dss_replay_data_t) + len));
+}
+
+static void on_replay_req(const uint8_t* body, uint16_t len, uint32_t now_ms)
+{
+  uint16_t run, max_len;
+  uint32_t from_frame, stream, offset;
+  if (len < sizeof(dss_replay_req_t))
+    return;
+  run = get16(body + 0);
+  max_len = get16(body + 2);
+  from_frame = get32(body + 4);
+  stream = get32(body + 8);
+  offset = get32(body + 12);
+  if (!g_recording || run != g_run) {
+    send_replay(DSS_REPLAY_NONE, 0, 0, 0);
+    return;
+  }
+  if (stream == 0) {
+    int gap;
+    const uint32_t start = dscm_rec_find(from_frame, &gap);
+    if (start == (uint32_t)-1) {
+      send_replay(DSS_REPLAY_NONE, 0, 0, 0);
+      return;
+    }
+    g_replay_stream = start;
+    g_replaying = 1;                   /* no live FRAMEs until the phone caught up */
+    g_replay_ms = now_ms;
+    send_replay(gap ? DSS_REPLAY_GAP : 0, start, 0, max_len);
+    return;
+  }
+  g_replay_ms = now_ms;
+  send_replay(0, stream, offset, max_len);
+}
+
+static void on_replay_done(const uint8_t* body, uint16_t len, uint32_t now_ms)
+{
+  uint32_t stream, offset;
+  const uint8_t* vals;
+  if (len < sizeof(dss_replay_done_t) || !g_recording || get16(body + 0) != g_run)
+    return;
+  stream = get32(body + 4);
+  offset = get32(body + 8);
+  g_replay_ms = now_ms;
+  if (stream + offset < dscm_rec_written()) {
+    send_replay(0, stream, offset, DSS_REPLAY_CHUNK);   /* more came meanwhile */
+    return;
+  }
+  /* caught up: live again, as DELTAs from the values the phone now has */
+  vals = dscm_rec_values(g_watch, g_watch_count, g_generation);
+  if (vals) {
+    memcpy(g_last, vals, (size_t)g_watch_count * 4);
+    g_have_last = 1;
+    g_force_full = 0;
+  } else {
+    g_have_last = 0;
+  }
+  g_replaying = 0;
+}
+
 /* The phone evaluates the set and unlocks; it then sends a CUE so the console
  * can blink its LED, the way the on-console build does for its own unlocks. */
 static void on_cue(const uint8_t* body, uint16_t len)
@@ -374,6 +478,8 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
             case DSS_T_CUE:       on_cue(body, length); break;
             case DSS_T_POPUP:     dscm_popup_on_popup(body, length); break;
             case DSS_T_BADGE:     dscm_popup_on_badge(body, length); break;
+            case DSS_T_REPLAY_REQ:  on_replay_req(body, length, g_now_ms); break;
+            case DSS_T_REPLAY_DONE: on_replay_done(body, length, g_now_ms); break;
             case DSS_T_KEEPALIVE: break;   /* liveness only */
             default: break;
           }
@@ -397,6 +503,27 @@ void dscm_stream_start(const char* hash, const char* game_code, const char* titl
   if (hash)  memcpy(g_hello.hash, hash, strnlen(hash, sizeof(g_hello.hash)));
   if (game_code) memcpy(g_hello.game_code, game_code, strnlen(game_code, sizeof(g_hello.game_code)));
   if (title) memcpy(g_hello.title, title, strnlen(title, sizeof(g_hello.title)));
+}
+
+/* The recording's ring (the module's view), from module.c once the stream
+ * is set up: from now on every frame is recorded, and HELLO says so with
+ * this run's id (new each game start, never 0). */
+void dscm_stream_record(void* ring, uint32_t size, uint32_t seed)
+{
+  dscm_rec_t* rec;
+  if (size < 16 * DSS_REC_SECTOR)
+    return;
+  g_run = (uint16_t)(seed ^ (seed >> 16));
+  if (!g_run)
+    g_run = 1;
+  dscm_rec_init(ring, size, g_run, g_hello.hash[0] ? g_hello.hash : NULL);
+  rec = dscm_rec_header();
+  if (!rec)
+    return;
+  dscm_publish_rec((void*)DSCM_PHYS(rec));
+  g_recording = 1;
+  g_hello.caps |= DSS_CAP_RECORD;
+  g_hello.run = g_run;
 }
 
 /* The phone the launcher found before the game (network byte order; 0 none):
@@ -443,21 +570,27 @@ static void lost_notice(uint32_t now_ms)
   snprintf(value, sizeof(value), "R%u K%u J%u C%u", (unsigned)l.cause_reason, (unsigned)l.need_ptk, (unsigned)l.join,
            (unsigned)l.connect_events);
   g_lost_shown++;
-  dscm_popup_local("Phone not reachable", "Achievements paused for now", value);
+  dscm_popup_local("Phone not reachable", g_recording ? "Recording: unlocks will follow" : "Achievements paused for now", value);
 }
 
 /* Called each idle pass after net_service(now_ms): the recv callback has
  * already run inside it. Keeps the pairing alive and broadcasts HELLO. */
 void dscm_stream_service(uint32_t now_ms)
 {
+  g_now_ms = now_ms;
   if (g_last_phone_ms == 1)         /* the callback heard from the phone this pass */
     g_last_phone_ms = now_ms ? now_ms : 1;
   dscm_g_status.net_detail = g_paired ? g_session : 0;   /* nonzero in the menu = paired */
+  if (g_replaying && now_ms - g_replay_ms > DSS_REPLAY_TIMEOUT_MS) {
+    g_replaying = 0;                /* the phone stopped reading: live again, from a FULL */
+    g_have_last = 0;
+  }
   if (g_paired) {
     if (now_ms - g_last_phone_ms > DSS_PAIR_TIMEOUT_MS) {
       g_paired = 0;
       g_session = 0;
       g_have_last = 0;
+      g_replaying = 0;
       g_lost_ms = now_ms ? now_ms : 1;
       g_lost_shown = 0;
     }
@@ -473,10 +606,18 @@ void dscm_stream_service(uint32_t now_ms)
 /* Called once per new frame (module.c, from the idle/halt path). */
 void dscm_stream_frame(uint32_t frame)
 {
+  static uint8_t cur[DSS_MAX_TABLE_WORDS * 4];
+  const int record = g_recording && g_watch_count;
   g_frame_sent = frame;
   g_hello.vblank = frame;
-  if (g_paired)
-    send_frame(frame);
+  if (!g_paired && !record)
+    return;
+  read_words(cur, g_watch_count);
+  /* recorded first, always: the phone may not hear the frame sent next */
+  if (record)
+    dscm_rec_frame(frame, g_watch, g_watch_count, g_generation, cur);
+  if (g_paired && !g_replaying)
+    send_frame(frame, cur);
 }
 
 /* STATUS for the phone's cart screen (every DSS_FULL_EVERY frames). */

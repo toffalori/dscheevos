@@ -136,6 +136,51 @@ static void test_capture(void)
   CHECK(wpa_rx(&w, cap_m3, sizeof(cap_m3), NULL, &o) == WPA_IGNORED);
 }
 
+/* the AP repeating itself: message 1 while it waits for message 2, message 3
+ * when our message 4 was lost */
+static void test_repeats(void)
+{
+  static const uint8_t ap[6] = {0x00, 0x0c, 0x41, 0x82, 0xb2, 0x55};
+  static const uint8_t sta[6] = {0x00, 0x0d, 0x93, 0x82, 0x36, 0x3a};
+  uint8_t pmk[32], m1[121], m3[179], other[32], kck[16];
+  wpa_ctx_t w;
+  wpa_out_t o;
+  unhex("a288fcf0caaacda9a9f58633ff35e8992a01d9c10ba5e02efdf8cb5d730ce7bc", pmk);
+  memset(other, 0x5C, 32);
+  wpa_begin(&w, pmk, sta, ap, WPA_CIPHER_TKIP);
+
+  /* message 1, then the same message 1 with a higher replay counter and a
+   * different random nonce on offer: the answer keeps the first nonce */
+  CHECK(wpa_rx(&w, cap_m1, sizeof(cap_m1), cap_m2 + 17, &o) == WPA_REPLY);
+  memcpy(m1, cap_m1, sizeof(m1));
+  m1[16] = 1;
+  CHECK(wpa_rx(&w, m1, sizeof(m1), other, &o) == WPA_REPLY);
+  CHECK(memcmp(o.eapol + 17, cap_m2 + 17, 32) == 0);
+  CHECK(mic_matches(w.pending, cap_m2, sizeof(cap_m2)));   /* the capture's PTK still */
+
+  /* message 3 as captured (its counter is 1: above the repeat's) */
+  CHECK(wpa_rx(&w, cap_m3, sizeof(cap_m3), NULL, &o) == WPA_REPLY);
+  CHECK(o.install_ptk && w.ptk_valid);
+  memcpy(kck, w.kck, 16);
+  /* message 3 again with the next counter, our message 4 having been lost:
+   * message 4 again under the same keys, nothing to install */
+  memcpy(m3, cap_m3, sizeof(m3));
+  m3[16] = 2;
+  hmac_sha1(kck, 16, m3, sizeof(m3), o.eapol);   /* scratch: recompute the AP's MIC */
+  memset(m3 + 81, 0, 16);
+  hmac_sha1(kck, 16, m3, sizeof(m3), o.eapol);
+  memcpy(m3 + 81, o.eapol, 16);
+  CHECK(wpa_rx(&w, m3, sizeof(m3), NULL, &o) == WPA_REPLY);
+  CHECK(!o.install_ptk && !o.install_gtk && o.eapol_len == 99);
+  CHECK(o.eapol[5] == 0x03 && o.eapol[6] == 0x0a && o.eapol[16] == 2);
+  CHECK(mic_matches(kck, o.eapol, o.eapol_len));
+  CHECK(memcmp(w.kck, kck, 16) == 0);
+  /* the same repeat once more: a replay, dropped; a forged one: dropped */
+  CHECK(wpa_rx(&w, m3, sizeof(m3), NULL, &o) == WPA_IGNORED);
+  m3[16] = 3;
+  CHECK(wpa_rx(&w, m3, sizeof(m3), NULL, &o) == WPA_IGNORED);
+}
+
 /* ---- simulated AP ---- */
 
 typedef struct ap_t {
@@ -330,6 +375,7 @@ int main(void)
 {
   test_prf();
   test_capture();
+  test_repeats();
   test_simulated_ap();
   printf("%d checks, %d failed\n", g_checks, g_failed);
   return g_failed ? 1 : 0;
