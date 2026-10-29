@@ -5,18 +5,23 @@
 #include <stdio.h>
 #include <string.h>
 
+/* nds-bootstrap's copy of this screen draws from the same code: trophy, title,
+ * bar and first-start note here, as a bitmap behind the console text. */
+#include "../../../external/nds-bootstrap/retail/common/include/cheevotron_loading.h"
+
 static PrintConsole top, bottom;
+static int top_bitmap = -1;   /* BG3: the splash's drawn part */
 
 /* White theme: the start goes white from here to the game (the loaders between
  * show white, and nds-bootstrap shows a copy of the splash in these colours:
  * keep them equal to holdLoadingScreen() in its bootloaderi/source/arm9/
  * main.arm9.c). Palette entry 0 is the screen background; entry 16*n+15
  * holds console colour n. */
-#define UI_BACKDROP RGB15(31, 31, 31)
-#define UI_WORDMARK RGB15(0, 11, 15)    /* \x1b[36;1m */
-#define UI_ACCENT   RGB15(0, 15, 19)    /* \x1b[36m: rule, Loading */
-#define UI_DIM      RGB15(13, 13, 14)   /* \x1b[30;1m: tagline */
-#define UI_TEXT     RGB15(4, 4, 5)      /* default (\x1b[39m) */
+#define UI_BACKDROP CHEEVOTRON_RGB_BACKGROUND
+#define UI_WORDMARK CHEEVOTRON_RGB_WORDMARK   /* \x1b[36;1m */
+#define UI_ACCENT   CHEEVOTRON_RGB_ACCENT     /* \x1b[36m: Loading */
+#define UI_DIM      CHEEVOTRON_RGB_DIM        /* \x1b[30;1m */
+#define UI_TEXT     CHEEVOTRON_RGB_TEXT       /* default (\x1b[39m) */
 
 static int splash_rows = 0;   /* rows the splash drew on top; status prints below */
 static int dots = 3, dot_frames;   /* the splash's "Loading..." dots */
@@ -32,19 +37,43 @@ static void apply_theme(u16* pal)
   pal[9 * 16 + 15] = RGB15(24, 3, 3);    /* \x1b[31;1m: errors */
   pal[10 * 16 + 15] = RGB15(2, 17, 4);   /* \x1b[32;1m: A */
   pal[11 * 16 + 15] = RGB15(21, 13, 0);  /* \x1b[33;1m: warnings */
+  /* the bitmap's colours (cheevotron_loading.h); the console's glyphs use only entries 16*n+15 */
+  pal[CHEEVOTRON_LOADING_WORDMARK] = CHEEVOTRON_RGB_WORDMARK;
+  pal[CHEEVOTRON_LOADING_ACCENT] = CHEEVOTRON_RGB_ACCENT;
+  pal[CHEEVOTRON_LOADING_DIM] = CHEEVOTRON_RGB_DIM;
+  pal[CHEEVOTRON_LOADING_TEXT] = CHEEVOTRON_RGB_TEXT;
+  pal[CHEEVOTRON_LOADING_SHADOW] = CHEEVOTRON_RGB_SHADOW;
+  pal[CHEEVOTRON_LOADING_GOLD] = CHEEVOTRON_RGB_GOLD;
 }
 
 void ui_init(void)
 {
-  videoSetMode(MODE_0_2D);
+  videoSetMode(MODE_3_2D);   /* BG0 the console, BG3 the splash bitmap behind it */
   videoSetModeSub(MODE_0_2D);
   vramSetBankA(VRAM_A_MAIN_BG);
   vramSetBankC(VRAM_C_SUB_BG);
   consoleInit(&top, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
   consoleInit(&bottom, 0, BgType_Text4bpp, BgSize_T_256x256, 31, 3, false, true);
+  /* 8 bpp at 0x06010000, past the console's font (base 0) and map (0x0600F800) */
+  top_bitmap = bgInit(3, BgType_Bmp8, BgSize_B8_256x256, 4, 0);
+  bgSetPriority(top_bitmap, 3);
+  bgHide(top_bitmap);
   apply_theme(BG_PALETTE);
   apply_theme(BG_PALETTE_SUB);
   consoleSelect(&top);
+}
+
+/* The splash's drawn part into BG3, shown behind the console. */
+static void draw_splash_bitmap(void)
+{
+  static u8 frame[256 * 192] __attribute__((aligned(4)));
+  vu32* dst = (vu32*)bgGetGfxPtr(top_bitmap);
+  const u32* src = (const u32*)frame;
+  memset(frame, CHEEVOTRON_LOADING_BACKGROUND, sizeof(frame));
+  cheevotronLoadingFrame(frame);
+  for (int i = 0; i < (int)(sizeof(frame) / 4); i++)
+    dst[i] = src[i];   /* VRAM takes no byte writes */
+  bgShow(top_bitmap);
 }
 
 /* Keeps the splash's dots moving while something waits, so a slow start
@@ -90,22 +119,18 @@ void ui_splash(const char* game)
 {
   char name[31];
   consoleSelect(&top);
+  cheevotronLoadingName(name, game ? game : "");   /* without the extension, as nds-bootstrap's copy */
   if (splash_rows) {
     /* already up (shown before the game was known): only add its name, so it stays one screen */
-    snprintf(name, sizeof(name), "%s", game ? game : "");
     printf("\x1b[14;0H\x1b[2K");
     center(14, name);
     printf("\x1b[%d;0H", splash_rows);
     return;
   }
   consoleClear();
-  center(8, "\x1b[36;1mC H E E V O T R O N\x1b[39;0m");               /* wordmark, bright cyan */
-  center(9, "\x1b[36m--------------------\x1b[39m");                  /* accent rule */
-  center(11, "\x1b[30;1machievements on real hardware\x1b[39;0m");    /* dim tagline */
-  if (game && game[0]) {
-    snprintf(name, sizeof(name), "%s", game);
+  draw_splash_bitmap();   /* trophy, title, bar, first-start note */
+  if (name[0])
     center(14, name);
-  }
   center(16, "\x1b[36mLoading...\x1b[39m");   /* cyan, above the status lines */
   splash_rows = 18;   /* ui_status lines go here, below the splash */
   consoleSelect(&top);
@@ -116,6 +141,7 @@ void ui_header(const char* game, const char* line2)
 {
   consoleSelect(&top);
   consoleClear();
+  bgHide(top_bitmap);
   printf("\x1b[0;0H\x1b[36;1m Cheevotron\x1b[39;0m");
   printf("\n--------------------------------");
   printf("\n %.30s\n", game ? game : "");

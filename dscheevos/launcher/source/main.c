@@ -114,7 +114,10 @@ static void boot_game(int with_achievements)
   const char* argv[1] = { BOOTSTRAP_PATH };
   if (!with_achievements)
     remove(DSC_DIR "session.bin");
-  ui_status(with_achievements ? "Starting with achievements..." : "Starting without achievements...");
+  /* Cheevotron's splash says "Loading..." already; the status line clears, so
+   * the screen matches nds-bootstrap's copy of it */
+  ui_status(!with_achievements ? "Starting without achievements..."
+            : settings.stream ? "" : "Starting with achievements...");
   if (keep_wifi)
     hand_over_wifi();
   else if (wifi_started)
