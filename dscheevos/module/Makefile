@@ -72,11 +72,10 @@ SRC := src/module.c src/syscalls.c src/heap.c src/fast_strtoul.c $(CORE)/src/dsc
 ifeq ($(STREAM),1)
 CFLAGS += -DDSCM_STREAM -I../display/include
 SRC += src/stream.c src/popup.c src/record.c
-# Pop-ups (src/popup.c): the display library's text mapping, and nds-bootstrap's
-# in-game menu font, generated into gen/ before the build (the devkitARM image
-# has no python): python3 ../display/tools/fontgen.py ../../external/nds-bootstrap
-#   extended_latin dsd_font_latin gen/font_latin.c
-DISPLAY_SRC := ../display/src/dsd_render.c ../display/src/dsd_sched.c ../display/src/dsd_badge.c gen/font_latin.c
+# Pop-ups (src/popup.c): the display library's text mapping, and the X11 misc-fixed
+# 5x7 font (display/src/dsd_font_small.c, made by display/tools/bdf2font.py from
+# display/third_party/misc-fixed/5x7.bdf).
+DISPLAY_SRC := ../display/src/dsd_render.c ../display/src/dsd_sched.c ../display/src/dsd_badge.c ../display/src/dsd_font_small.c
 endif
 OBJ := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(SRC))) $(patsubst $(RCHEEVOS)/src/%.c,$(BUILD)/rc/%.o,$(RC_SRC)) $(BUILD)/start.o \
   $(patsubst %.c,$(BUILD)/display/%.o,$(notdir $(DISPLAY_SRC))) \
@@ -129,7 +128,7 @@ $(BUILD)/net/cacerts.o: $(TLSCONF)/cacerts.c
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/start.o: src/start.s
 	@mkdir -p $(BUILD)
-	$(CC) $(ARCH) -Wa,--defsym,STACK_GAP=$(STACK_GAP) -c $< -o $@
+	$(CC) $(ARCH) -Wa,--defsym,STACK_GAP=$(STACK_GAP) $(if $(filter 1,$(STREAM)),-Wa$(comma)--defsym$(comma)DSCM_STREAM=1) -c $< -o $@
 $(BUILD)/display/%.o: ../display/src/%.c ../display/include/dsd.h include/dscheevos_module.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@

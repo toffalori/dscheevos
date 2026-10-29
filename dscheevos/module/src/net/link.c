@@ -52,7 +52,7 @@
 #define KEY_TIMEOUT_MS   5000    /* connect event to message 3 */
 #define LEAVE_TIMEOUT_MS 1000    /* our WMI_DISCONNECT to its event */
 #define BACKOFF_MIN_MS   1000
-#define BACKOFF_MAX_MS   30000
+#define BACKOFF_MAX_MS   10000   /* a router back from a restart is found within seconds */
 
 /* Association bookkeeping runs rarely: out of the hot code (hot-layout.ref). */
 #define DSCM_COLD __attribute__((section(".text_cold"), noinline))
@@ -414,6 +414,25 @@ static DSCM_COLD void abandon_attempt(void)
 {
   attempt_failed();
   leave_then_join();
+}
+
+/* The player asked for it (the in-game menu's "Reconnect"): the pause back to
+ * its shortest, and a fresh association now, unless one is under way. */
+DSCM_COLD void link_reconnect(void)
+{
+  g_backoff = BACKOFF_MIN_MS;
+  switch (g_join) {
+  case J_WAITING:
+    g_deadline = g_now;           /* join at the next service */
+    break;
+  case J_LEAVING:
+  case J_JOINING:
+  case J_KEYING:
+    break;
+  default:                        /* up, or given up */
+    leave_then_join();
+    break;
+  }
 }
 
 /* keys in, as dswifi does after its handshake */

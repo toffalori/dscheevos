@@ -30,6 +30,7 @@ void dscm_stream_set_phone(uint32_t ip);
 void dscm_stream_record(void* ring, uint32_t size, uint32_t seed);
 int dscm_stream_net_init(void);
 void dscm_stream_service(uint32_t now_ms);
+void dscm_stream_reconnect(void);
 void dscm_stream_frame(uint32_t frame);
 void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_max);
 /* src/popup.c: pop-ups on the console's screen, armed in idle time */
@@ -188,7 +189,8 @@ typedef struct dscm_irq_t {
   volatile uint32_t idle_cut_lines;
   uint32_t idle_cut;
   uint32_t frames_missed;
-  uint32_t reserved2[5];
+  volatile uint32_t reconnect;   /* streamer: the in-game menu asked to reconnect (start.s reconnect_entry) */
+  uint32_t reserved2[4];
 } dscm_irq_t;
 /* Idle lines per frame, from the idle thread, with IRQs masked: at each
  * pass's start and end it closes the frames that ended since (VBlanks
@@ -251,6 +253,7 @@ _Static_assert(offsetof(dscm_irq_t, on) == 8 && offsetof(dscm_irq_t, data_region
 _Static_assert(offsetof(dscm_irq_t, idle_start) == 16 && offsetof(dscm_irq_t, timed_frames) == 20 && offsetof(dscm_irq_t, irq_lines_total) == 24, "dscm_irq");
 _Static_assert(offsetof(dscm_irq_t, irq_lines_last) == 28 && offsetof(dscm_irq_t, irq_lines_max) == 30, "dscm_irq");
 _Static_assert(offsetof(dscm_irq_t, idle_cut_lines) == 32 && offsetof(dscm_irq_t, idle_cut) == 36 && offsetof(dscm_irq_t, frames_missed) == 40, "dscm_irq");
+_Static_assert(offsetof(dscm_irq_t, reconnect) == 44, "dscm_irq: start.s IRQ_RECONNECT (reconnect_entry writes it)");
 #define g_frames (dscm_irq.frames)
 
 /* The ARM7's VBlank count, written behind the data cache. Through the
@@ -1104,6 +1107,8 @@ int module_idle(int idle_loop)
     H.reset_pending = 0;
     dscm_popup_reset();   /* the game starts over: the pop-ups' state goes, no register touched */
   }
+  if (dscm_irq.reconnect && dscm_take(&dscm_irq.reconnect) && H.net_started)
+    dscm_stream_reconnect();
   if (dscm_popup_active || dscm_popup_watch)
     dscm_popup_idle(c);
   if (c != dscm_irq.last_vblank) {

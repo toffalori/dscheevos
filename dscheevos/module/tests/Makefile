@@ -64,9 +64,9 @@ $(BUILD)/test_heap: test_heap.c $(BUILD)/heap/heap.o $(BUILD)/heap/dscheevos.o $
 # writes the bands it draws as PPM images into build/popup.
 FONTS    ?= ../../../external/nds-bootstrap/retail/nitrofiles/fonts
 DISPLAY  := ../../display
-$(BUILD)/test_popup: test_popup.c ../src/popup.c ../include/ds_stream_protocol.h $(DISPLAY)/src/dsd_render.c
+$(BUILD)/test_popup: test_popup.c ../src/popup.c ../include/ds_stream_protocol.h $(DISPLAY)/src/dsd_render.c $(DISPLAY)/src/dsd_font_small.c
 	@mkdir -p $(BUILD)/popup
 	$(CC) $(CFLAGS) -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -DDSCM_STREAM -I../include -I$(DISPLAY)/include \
-	  test_popup.c $(DISPLAY)/src/dsd_render.c $(DISPLAY)/src/dsd_badge.c $(DISPLAY)/src/dsd_sched.c -o $@
+	  test_popup.c $(DISPLAY)/src/dsd_render.c $(DISPLAY)/src/dsd_badge.c $(DISPLAY)/src/dsd_sched.c $(DISPLAY)/src/dsd_font_small.c -o $@
 clean:
 	rm -rf $(BUILD)

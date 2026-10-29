@@ -37,8 +37,13 @@
 #include <stddef.h>
 #include <string.h>
 
-/* gen/font_latin.c: nds-bootstrap's in-game menu font (display/tools/fontgen.py) */
-extern const dsd_font_t dsd_font_latin;
+/* display/src/dsd_font_small.c: the X11 misc-fixed 5x7 font (display/tools/bdf2font.py),
+ * smaller than nds-bootstrap's 8x8 menu font so the band takes fewer of the game's lines */
+extern const dsd_font_t dsd_font_small;
+#define FONT       dsd_font_small
+#define FONT_ROWS  7                           /* cap height 6, one row of descender */
+#define LINE_PITCH 8                           /* one empty row between lines */
+#define LINE_GLYPHS 56                         /* glyphs per line: about 220 pixels of the narrow font */
 
 /* stream.c: one packet to the paired phone (dropped when unpaired) */
 void dscm_stream_send(uint8_t type, const void* body, uint16_t len);
@@ -106,8 +111,9 @@ extern void dscm_dc_invalidate(const void* addr, uint32_t len);
 
 /* ---- the band ---- */
 
-#define TOAST_ROWS 32
+#define TOAST_ROWS 26                          /* three lines of the 5x7 font, one row apart; was 32 with the 8x8 font */
 #define SMALL_ROWS 16
+#define TOAST_BADGE 24                         /* the toast's badge side; the phone sends 32 (scaled here) or 24 */
 #define MARGIN     4                           /* rows fed past the band: the FIFO reads ahead */
 #define SLIDE      4                           /* frames to slide in, and out */
 #define HOLD_DEFAULT 180
@@ -456,7 +462,7 @@ void dscm_popup_on_badge(const uint8_t* body, uint16_t len)
   offset = (uint16_t)(body[4] | body[5] << 8);
   total = (uint16_t)(body[6] | body[7] << 8);
   n = (uint16_t)(len - sizeof(dss_badge_t));
-  if (!id || (side != 32 && side != 16) || body[3] != DSS_BADGE_BGR555 || total != side * side * 2
+  if (!id || (side != 32 && side != 24 && side != 16) || body[3] != DSS_BADGE_BGR555 || total != side * side * 2
       || n == 0 || n > DSS_BADGE_CHUNK_MAX || offset % DSS_BADGE_CHUNK_MAX || offset >= total || n > total - offset)
     return;
   b = badge_find(id);
@@ -496,7 +502,7 @@ static int fit(uint8_t* g, int n, int px)
     w += g_widths[g[i++]];
   while (i > 0 && g[i - 1] == ' ')
     i--;
-  for (k = 0; k < 3 && i < DSD_LINE_MAX; k++)
+  for (k = 0; k < 3 && i < LINE_GLYPHS; k++)
     g[i++] = '.';
   return i;
 }
@@ -505,8 +511,8 @@ static void draw_text(uint16_t* band, int rows, int x, int y, const uint8_t* g, 
 {
   int i, r, j;
   for (i = 0; i < n; i++) {
-    const uint8_t* glyph = dsd_font_latin.glyphs + g[i] * 8;
-    for (r = 0; r < 8; r++) {
+    const uint8_t* glyph = FONT.glyphs + g[i] * 8;
+    for (r = 0; r < FONT_ROWS; r++) {
       uint8_t bits = glyph[r];
       if (y + r < 0 || y + r >= rows)
         continue;
@@ -521,22 +527,52 @@ static void draw_text(uint16_t* band, int rows, int x, int y, const uint8_t* g, 
 /* One line of text at x (left side) or ending at 256 - x (right side). */
 static void draw_line(uint16_t* band, int rows, int right, int x, int y, const char* s, int px, uint16_t c)
 {
-  uint8_t g[DSD_LINE_MAX];
-  int n = fit(g, dsd_text_to_glyphs(&dsd_font_latin, s, g, DSD_LINE_MAX - 3), px);
+  uint8_t g[LINE_GLYPHS];
+  int n = fit(g, dsd_text_to_glyphs(&FONT, s, g, LINE_GLYPHS - 3), px);
   draw_text(band, rows, right ? 256 - x - text_width(g, n) : x, y, g, n, c);
 }
 
 /* The value ("10 pts") at the far end of the line; returns its width. */
 static int draw_value(uint16_t* band, int rows, int right, int y, const char* s, uint16_t c)
 {
-  uint8_t g[DSD_LINE_MAX];
+  uint8_t g[LINE_GLYPHS];
   int n, w;
   if (!s[0])
     return 0;
-  n = dsd_text_to_glyphs(&dsd_font_latin, s, g, DSS_POPUP_VALUE_MAX);
+  n = dsd_text_to_glyphs(&FONT, s, g, DSS_POPUP_VALUE_MAX);
   w = text_width(g, n);
   draw_text(band, rows, right ? 6 : 256 - 6 - w, y, g, n, c);
   return w;
+}
+
+/* The badge at bx, by: as sent, or a 32-pixel one scaled to 24 (each pixel
+ * the area-weighted mean of the source pixels under it: 4 to 3, weights 3:1,
+ * 2:2, 1:3 per axis). */
+static void draw_badge(const badge_slot_t* b, int bx, int by, int side)
+{
+  static const uint8_t wt[3][2] = { { 3, 1 }, { 2, 2 }, { 1, 3 } };
+  int x, y, i, j;
+  if (b->side == side) {
+    for (y = 0; y < side; y++)
+      for (x = 0; x < side; x++)
+        g_band[(by + y) * 256 + bx + x] = b->px[y * side + x] & 0x7FFF;
+    return;
+  }
+  for (y = 0; y < side; y++) {
+    const int sy = y / 3 * 4 + y % 3;
+    for (x = 0; x < side; x++) {
+      const int sx = x / 3 * 4 + x % 3;
+      uint32_t r = 0, g = 0, bl = 0;
+      for (i = 0; i < 2; i++)
+        for (j = 0; j < 2; j++) {
+          const uint32_t px = b->px[(sy + i) * 32 + sx + j], k = (uint32_t)wt[y % 3][i] * wt[x % 3][j];
+          r += (px & 31) * k;
+          g += (px >> 5 & 31) * k;
+          bl += (px >> 10 & 31) * k;
+        }
+      g_band[(by + y) * 256 + bx + x] = (uint16_t)((r + 8) / 16 | (g + 8) / 16 << 5 | (bl + 8) / 16 << 10);
+    }
+  }
 }
 
 /* g_cur into g_band, rows lines plus the margin; then to RAM for the DMA. */
@@ -547,7 +583,7 @@ static void render(void)
   const int right = (p->position & DSS_POPUP_POS_RIGHT) != 0;
   const uint16_t accent = accent_of(p);
   const badge_slot_t* b = p->badge_id ? badge_find(p->badge_id) : NULL;
-  const int side = rows == TOAST_ROWS ? 32 : 16;
+  const int side = rows == TOAST_ROWS ? TOAST_BADGE : 16;
   int x, y, text_x, vw;
   uint32_t* w32 = (uint32_t*)g_band;
   const uint32_t bg2 = (uint32_t)C_BG | (uint32_t)C_BG << 16;
@@ -560,11 +596,8 @@ static void render(void)
     for (x = 0; x < 3; x++)
       g_band[y * 256 + (right ? 255 - x : x)] = accent;
 
-  if (b && badge_ready(b) && b->side == side) {
-    const int bx = right ? 256 - 4 - side : 4, by = (rows - side) / 2;
-    for (y = 0; y < side; y++)
-      for (x = 0; x < side; x++)
-        g_band[(by + y) * 256 + bx + x] = b->px[y * side + x] & 0x7FFF;
+  if (b && badge_ready(b) && (b->side == side || (b->side == 32 && side == 24))) {
+    draw_badge(b, right ? 256 - 4 - side : 4, (rows - side) / 2, side);
     text_x = 4 + side + 4;
   } else {
     const uint16_t* icon = icon_of(p->kind);
@@ -583,16 +616,16 @@ static void render(void)
   if (rows == TOAST_ROWS) {
     /* label in the accent colour with the value at the far end, title, detail */
     const int avail = 256 - text_x - 6;
-    vw = draw_value(g_band, rows, right, 3, p->value, C_TEXT);
-    draw_line(g_band, rows, right, text_x, 3, p->label[0] ? p->label : default_label(p->kind),
+    vw = draw_value(g_band, rows, right, 2, p->value, C_TEXT);
+    draw_line(g_band, rows, right, text_x, 2, p->label[0] ? p->label : default_label(p->kind),
               avail - (vw ? vw + 8 : 0), accent);
-    draw_line(g_band, rows, right, text_x, 13, p->title, avail, C_TEXT);
-    draw_line(g_band, rows, right, text_x, 22, p->detail, avail, C_DIM);
+    draw_line(g_band, rows, right, text_x, 2 + LINE_PITCH, p->title, avail, C_TEXT);
+    draw_line(g_band, rows, right, text_x, 2 + 2 * LINE_PITCH, p->detail, avail, C_DIM);
   } else {
     /* one line: the title, the value at the far end in the accent colour */
     const int avail = 256 - text_x - 6;
-    vw = draw_value(g_band, rows, right, 4, p->value, accent);
-    draw_line(g_band, rows, right, text_x, 4, p->title[0] ? p->title : default_label(p->kind),
+    vw = draw_value(g_band, rows, right, 5, p->value, accent);
+    draw_line(g_band, rows, right, text_x, 5, p->title[0] ? p->title : default_label(p->kind),
               avail - (vw ? vw + 8 : 0), C_TEXT);
   }
 
@@ -1614,15 +1647,16 @@ void dscm_popup_init(void)
 {
   int g;
   for (g = 0; g < 256; g++) {
-    /* advance: up to the rightmost lit column, plus one (dsd_init's rule) */
-    const uint8_t* rows = dsd_font_latin.glyphs + g * 8;
+    /* advance: up to the rightmost lit column, plus one (dsd_init's rule; the
+     * small font's glyphs start at the left edge, so this spaces them evenly) */
+    const uint8_t* rows = FONT.glyphs + g * 8;
     uint8_t lit = 0;
     int r, w = 0;
-    for (r = 0; r < 8; r++)
+    for (r = 0; r < FONT_ROWS; r++)
       lit |= rows[r];
     while (lit >> w)
       w++;
-    g_widths[g] = w ? (uint8_t)(w + 1) : 4;
+    g_widths[g] = w ? (uint8_t)(w + 1) : 3;
   }
   g_screen_last = POWCNT1 & POWCNT1_TOP;
   {

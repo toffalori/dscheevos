@@ -420,7 +420,10 @@ typedef struct dscm_header_t {
   void* net_ring;                     /* 0x44: dscm_shim.h ring, 0 if none; same line */
   volatile uint32_t cues;             /* 0x48: LED cues for the ARM7 (DSCM_CUE_*); same cache line, cleaned to RAM */
   dscm_rec_t* volatile rec;           /* 0x4C: the streamer's recording (physical address), 0 if none */
-  uint32_t reserved2[4];
+  /* 0x50: ARM code, streamer only (0 in the on-console build). The in-game
+   * menu calls it with the game stopped: reconnect at the next idle pass. */
+  void (*reconnect)(void);
+  uint32_t reserved2[3];
   /* 0x60: the VBlank IRQ's own state, then its code (module internals) */
 } dscm_header_t;
 

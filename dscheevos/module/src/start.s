@@ -37,7 +37,12 @@ dscm_cues:
 	.global dscm_rec_ptr
 dscm_rec_ptr:
 	.word 0                     @ 0x4C: the streamer's recording (dscm_rec_t, physical) for the ARM7
-	.space 16
+.ifdef DSCM_STREAM
+	.word reconnect_entry       @ 0x50: the in-game menu's "Reconnect" (streamer only)
+.else
+	.word 0
+.endif
+	.space 12
 
 @ The wake page (module.c wake_page_t): dscm_irq (frame counting and the
 @ wake's flags), g_idle, H and the re-entry guard, the module region's last
@@ -51,6 +56,7 @@ dscm_rec_ptr:
 	.equ	PAGE_H, 96                  @ offsetof(wake_page_t, h)
 	.equ	PAGE_GUARD, 128             @ offsetof(wake_page_t, guard)
 	.equ	IRQ_DATA_REGION, 9          @ dscm_irq_t.data_region
+	.equ	IRQ_RECONNECT, 44           @ dscm_irq_t.reconnect (reconnect_entry)
 	@ module.c's H: what reset_entry writes when the data view is read-only
 	.equ	H_RESET_PENDING, 14
 	.equ	H_BUSY, 28
@@ -1295,6 +1301,30 @@ reset_entry:
 	mov	r2, #0
 	mcr	p15, 0, r2, c7, c10, 4
 	bx	lr
+
+.ifdef DSCM_STREAM
+@ Reconnect (streamer only): nds-bootstrap's in-game menu calls it with the
+@ game stopped. It only sets dscm_irq.reconnect, written as reset_entry
+@ writes H (main RAM view, both views' lines written back and dropped);
+@ the next idle pass acts on it (module.c, stream.c dscm_stream_reconnect).
+	.global reconnect_entry
+	.type reconnect_entry, %function
+reconnect_entry:
+	mov	r0, #MIRROR_HI
+	orr	r0, r0, #REGION_END
+	sub	r0, r0, #GUARD_BACK
+	sub	r0, r0, #PAGE_GUARD - PAGE_IRQ - IRQ_RECONNECT   @ the word, mirror view
+	mcr	p15, 0, r0, c7, c14, 1      @ clean and drop: a cached data view (SDK5) may hold it dirty
+	mov	r2, #0
+	mcr	p15, 0, r2, c7, c10, 4
+	bic	r0, r0, #0x0F000000          @ 0x0Cxxxxxx -> 0x02xxxxxx (no change in the cached build)
+	orr	r0, r0, #0x02000000
+	mov	r1, #1
+	str	r1, [r0]
+	mcr	p15, 0, r0, c7, c14, 1
+	mcr	p15, 0, r2, c7, c10, 4
+	bx	lr
+.endif
 
 @ The protection region holding dscm_irq (the highest enabled one), from
 @ CP15 c6, for halt_entry and flush_entry (r12 = the guard, in the wake page,

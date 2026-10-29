@@ -602,6 +602,16 @@ static void link_note(uint32_t line, uint32_t now_ms)
   dscm_rec_note(line, text);
 }
 
+/* "Reconnect" in nds-bootstrap's in-game menu (module.c, at the next idle
+ * pass): a fresh Wi-Fi association with the rejoin's pause back to its
+ * shortest, and a notice so the player sees it started. HELLO goes out every
+ * DSS_HELLO_MS while unpaired, so a phone back on the network pairs again. */
+void dscm_stream_reconnect(void)
+{
+  link_reconnect();
+  dscm_popup_local("Reconnecting...", "Looking for the phone", "");
+}
+
 /* Called each idle pass after net_service(now_ms): the recv callback has
  * already run inside it. Keeps the pairing alive and broadcasts HELLO. */
 void dscm_stream_service(uint32_t now_ms)
