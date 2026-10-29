@@ -1109,7 +1109,7 @@ enum {
   LC_MODE0 = 156, LC_REASSERT = 160, LC_ENDED = 164, LC_LATENCY = 168, LC_SPIN = 172, LC_STANDDOWN = 176,
   LC_SKIPWHY = 180, LW_T2ADDR = 192, LW_T2VAL = 196, LW_NEXPIRE = 200, LW_LYC2 = 204,
   LC_DMASEEN = 208, LC_BUSYS = 212, LC_BUSYE = 216, LW_HOLD = 232, LC_HELD = 236, LC_HOLDIPC = 240,
-  LC_GXS = 244, LC_GXE = 248,
+  LC_GXS = 244, LC_GXE = 248, LC_HOLDOUT = 252,
 };
 #define LC_COUNT     10                        /* LC_VC .. LC_ENDED, read as deltas each tick */
 #define LINE_EXPIRE  120                       /* frames a published band stays good without the idle pass */
@@ -1121,8 +1121,8 @@ static uint8_t  g_line;                        /* the line path is installed */
 static uint8_t  g_line_off;                    /* left to the game's VCOUNT use: the idle-armed path for the game */
 static uint8_t  g_line_used;                   /* a line path went up in this game: the leak watch from then on */
 static uint32_t g_line_seen[LC_COUNT];         /* the counters at the last tick */
-static const uint16_t k_feed_off[6] = { LC_BUSYS, LC_BUSYE, LC_GXS, LC_GXE, LC_HELD, LC_HOLDIPC };
-static uint32_t g_feed_seen[6];                /* those counters at the last tick */
+static const uint16_t k_feed_off[7] = { LC_BUSYS, LC_BUSYE, LC_GXS, LC_GXE, LC_HELD, LC_HOLDIPC, LC_HOLDOUT };
+static uint32_t g_feed_seen[7];                /* those counters at the last tick */
 
 /* GX_DispOff, word for word in NitroSDK 2.0 (Super Mario 64 DS) and 4.x
  * (Pokemon HG, Platinum): DISPCNT's mode bits saved in sDispMode (ldr r0,=),
@@ -1287,7 +1287,7 @@ static int line_install(void)
   dscm_irq_restore(cpsr);
   for (i = 0; i < LC_COUNT; i++)
     g_line_seen[i] = 0;
-  for (i = 0; i < 6; i++)
+  for (i = 0; i < 7; i++)
     g_feed_seen[i] = 0;
   g_line = 1;
   dscm_popup_watch = 1;
@@ -1372,8 +1372,8 @@ static uint32_t line_collect(uint32_t* cut)
   g_stats.line_standdown = (uint8_t)LW(LC_STANDDOWN);
   {
     /* the feed's telemetry, as deltas like the counters above */
-    uint32_t f[6];
-    for (i = 0; i < 6; i++) {
+    uint32_t f[7];
+    for (i = 0; i < 7; i++) {
       const uint32_t v = LW(k_feed_off[i]);
       f[i] = v - g_feed_seen[i];
       g_feed_seen[i] = v;
@@ -1385,6 +1385,7 @@ static uint32_t line_collect(uint32_t* cut)
     g_stats.feed_gx_end += f[3];
     g_stats.feed_held += f[4];
     g_stats.feed_hold_ipc += f[5];
+    g_stats.hold_out = (uint16_t)(g_stats.hold_out + f[6] < 0xFFFF ? g_stats.hold_out + f[6] : 0xFFFF);
   }
   if (LW(LW_STAGE) == 2 && d[1])
     g_line_used = 1;                           /* our mode 3 went out: the leak watch for good */

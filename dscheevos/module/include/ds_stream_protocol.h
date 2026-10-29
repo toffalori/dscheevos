@@ -266,7 +266,8 @@ typedef struct __attribute__((packed)) {
   uint32_t skip_vector;    /* the IRQ vector or the high-vector bit */
   uint32_t skip_screen;    /* the main engine changed screens recently */
   uint32_t vector_lost;    /* the IRQ vector changed under an armed band (a soft reset, or the game) */
-  uint16_t reserved4;      /* 0 (was a FIFO depth measurement) */
+  uint16_t hold_out;       /* CPU holds (DSS_DISPLAY_ON_HOLD) ended by their bound or an odd VCOUNT, the band
+                              left up (saturates; was a FIFO depth measurement, then 0) */
   uint8_t  nwram;          /* the last band was fed from shared WRAM (else main RAM) */
   uint8_t  reserved3;
   /* while pop-ups are up, why frames went without the band */
@@ -313,7 +314,7 @@ typedef struct __attribute__((packed)) {
                               13 its command FIFO not empty, 14 that FIFO half full or more */
   uint32_t feed_busy_start;/* bands that started with another DMA channel busy */
   uint32_t feed_busy_end;  /* bands that reached the VBlank with one busy */
-  uint32_t feed_gx_start;  /* bands that started with the geometry engine busy or its FIFO not empty */
+  uint32_t feed_gx_start;  /* bands that started with the geometry FIFO half full or more */
   uint32_t feed_gx_end;    /* bands that reached the VBlank so */
   uint32_t feed_held;      /* bands with the game's CPU held to their end (DSS_DISPLAY_ON_HOLD) */
   uint32_t feed_hold_ipc;  /* holds ended early: an IPC sync was due (nds-bootstrap's menu or reset) */

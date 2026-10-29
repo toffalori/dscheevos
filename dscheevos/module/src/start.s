@@ -458,7 +458,8 @@ dscm_dtcm_base:
 	.equ	C_HOLDIPC, 240              @ holds ended early for an IPC sync
 	.equ	C_GXS, 244                  @ bands that started with the geometry engine busy or its FIFO not empty
 	.equ	C_GXE, 248                  @ bands that reached the VBlank so
-	.equ	HOLD_MAX, 2048              @ hold loop passes (about 2.4 us each: the band's 32 lines take ~850)
+	.equ	C_HOLDOUT, 252              @ holds ended by the bound or an odd VCOUNT (the band left up)
+	.equ	HOLD_MAX, 8192              @ hold loop passes (1-2.5 us each by the CPU clock: 33 lines take < 2500)
 	.equ	HOLD_PAUSE, 32              @ register-only loops between the hold's I/O reads, off the bus
 	.equ	SPIN_MAX, 4096
 	.equ	REASSERT_MAX, 64            @ the game keeps turning our VCOUNT IRQ off: leave it to the game
@@ -953,8 +954,8 @@ line_vcount:
 	ldrne	r1, [r3, #C_BUSYS]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_BUSYS]
-	tst	r0, #0x3000                 @ the geometry engine at work
-	ldrne	r1, [r3, #C_GXS]
+	tst	r0, #0x4000                 @ the geometry FIFO half full or more (the engine's busy bit
+	ldrne	r1, [r3, #C_GXS]            @ also stays up while a buffer swap waits for the VBlank)
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_GXS]
 	@ the hold test (DSS_DISPLAY_ON_HOLD): the game's CPU kept here, off the
@@ -970,27 +971,42 @@ line_vcount:
 1:	mov	r1, #HOLD_PAUSE
 2:	subs	r1, r1, #1
 	bne	2b
-	ldrh	r1, [r12, #6]               @ VCOUNT
-	cmp	r1, #192
-	bhs	3f                          @ the band is drawn: the VBlank comes next
-	ldr	r0, [r3, #L_FIRST]
-	sub	r0, r0, #2
-	cmp	r1, r0
-	blo	3f                          @ before the band: a frame went by (never expected)
 	ldr	r1, [r12, #0x214]
 	ldr	r0, [r12, #0x210]
 	and	r1, r1, r0
+	tst	r1, #1                      @ the VBlank due: the band is drawn
+	bne	3f
 	tst	r1, #0x10000                @ IPC sync due: nds-bootstrap's menu or reset must not wait
 	bne	4f
+	ldrh	r1, [r12, #6]               @ VCOUNT
+	cmp	r1, #192
+	bhs	5f                          @ past the band without the VBlank IRQ (never expected)
+	ldr	r0, [r3, #L_FIRST]
+	sub	r0, r0, #2
+	cmp	r1, r0
+	blo	5f                          @ before the band: a frame went by (never expected)
 	subs	r2, r2, #1
 	bne	1b
-3:	ldr	r1, [r3, #C_HELD]
-	add	r1, r1, #1
-	str	r1, [r3, #C_HELD]
+5:	ldr	r1, [r3, #C_HOLDOUT]        @ the bound or an odd line: back to the game, the band up,
+	add	r1, r1, #1                  @ unless the VBlank came meanwhile (then its own path)
+	str	r1, [r3, #C_HOLDOUT]
+	ldr	r2, [r12, #0x210]
+	ldr	r1, [r12, #0x214]
+	and	r2, r2, r1
+	tst	r2, #1
+	bne	line_vblank
 	b	line_chain
-4:	ldr	r1, [r3, #C_HOLDIPC]
+3:	ldr	r1, [r3, #C_HELD]           @ the VBlank's own path next: the band down, then the
+	add	r1, r1, #1                  @ game's handler for it
+	str	r1, [r3, #C_HELD]
+	ldr	r2, [r12, #0x210]
+	ldr	r1, [r12, #0x214]
+	and	r2, r2, r1                  @ r2: IE & IF, as line_vblank takes it
+	b	line_vblank
+4:	ldr	r1, [r3, #C_HOLDIPC]        @ the band down first, as at any IPC sync
 	add	r1, r1, #1
 	str	r1, [r3, #C_HOLDIPC]
+	bl	band_down
 	b	line_chain
 line_late:
 	ldr	r1, [r3, #C_LATE]
@@ -1025,7 +1041,7 @@ line_vblank:
 	ldrne	r1, [r3, #C_BUSYE]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_BUSYE]
-	tst	r0, #0x3000
+	tst	r0, #0x4000
 	ldrne	r1, [r3, #C_GXE]
 	addne	r1, r1, #1
 	strne	r1, [r3, #C_GXE]
@@ -1137,7 +1153,7 @@ line_chain:                          @ our lines to RAM, r0 and lr as the BIOS l
 	mcr	p15, 0, r1, c7, c10, 1
 	add	r1, r3, #192
 	mcr	p15, 0, r1, c7, c10, 1
-	add	r1, r3, #224                @ C_XMAX, C_XN
+	add	r1, r3, #224                @ L_HOLD .. C_HOLDOUT
 	mcr	p15, 0, r1, c7, c10, 1
 	ldr	lr, [r3, #L_BIOS_LR]
 	mrc	p15, 0, r0, c9, c1, 0
