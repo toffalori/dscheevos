@@ -461,6 +461,14 @@ int main(int argc, char** argv)
   run(path, TOAST_ROWS, 1);
   expect_states(life, 3);
 
+  /* the console's own notice (the phone gone): shown even from a dry run */
+  dscm_popup_set_mode(DSS_DISPLAY_DRY);
+  dscm_popup_local("Phone link lost", "N2 P12345 E0 Q4/0 D12 J0 F5", "#1");
+  if (g_mode != DSS_DISPLAY_ON) { printf("FAIL: local notice left the dry run on\n"); return 1; }
+  snprintf(path, sizeof(path), "%s/lost.ppm", argv[2]);
+  run(path, TOAST_ROWS, 1);
+  expect_states(life, 3);
+
   /* telemetry: every frame so far had the band; then frames the game was
    * busy into the band, idle only in VBlank, idle in time with an IRQ due,
    * and never idle */

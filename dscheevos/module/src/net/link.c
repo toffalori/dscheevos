@@ -561,6 +561,29 @@ uint32_t link_rejoins(void)
   return g_rejoins;
 }
 
+void link_diag(dss_link_status_t* out)
+{
+  dscm_dc_invalidate((const void*)&g_ring.attached, offsetof(shim_shared_t, tx) - offsetof(shim_shared_t, attached));
+  out->shim_polls = g_ring.stats.polls;
+  out->shim_idle_polls = g_ring.stats.idle_polls;
+  out->shim_tx = g_ring.stats.tx_frames;
+  out->shim_rx = g_ring.stats.rx_frames;
+  out->shim_rx_ring_full = g_ring.stats.rx_ring_full;
+  out->shim_sdio_errors = g_ring.stats.sdio_errors;
+  out->shim_last_error = g_ring.stats.last_error;
+  out->shim_last_int = g_ring.stats.last_int_status;
+  out->shim_paused_wifi = g_ring.stats.paused_ntr_wifi;
+  out->shim_paused_card = g_ring.stats.paused_card_read;
+  out->arm9_rx = g_rx_frames;
+  out->arm9_tx = g_tx_frames;
+  out->arm9_tx_drops = g_tx_drops;
+  out->rejoins = g_rejoins;
+  out->tx_queued = (uint8_t)(g_ring.tx_head - g_ring.tx_tail);
+  out->rx_queued = (uint8_t)(g_ring.rx_head - g_ring.rx_tail);
+  out->shim_flags = (uint8_t)((g_ring.attached ? 1 : 0) | (g_ring.dead ? 2 : 0) | (g_ring.run ? 4 : 0));
+  out->join = (uint8_t)g_join;
+}
+
 void link_stats(uint32_t* rx, uint32_t* tx, uint32_t* drops)
 {
   *rx = g_rx_frames;

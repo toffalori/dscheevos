@@ -318,6 +318,30 @@ typedef struct __attribute__((packed)) {
   uint32_t feed_gcnt;      /* NDMAGCNT when the line path went up: bit 31 round robin, 16-19 its CPU cycles */
 } dss_display_status_t;    /* 164; the skips count frames, once per reason */
 
+/* After dss_display_status_t: the Wi-Fi link through the ARM7 shim (the
+ * module's net/link.c and the card engine's dscm_shim.h ring), to see what
+ * fails in the seconds before the phone stops hearing the console. */
+typedef struct __attribute__((packed)) {
+  uint32_t shim_polls;     /* the ARM7 shim's polls of the chip (one a VBlank while it runs) */
+  uint32_t shim_idle_polls;/* polls with nothing to do */
+  uint32_t shim_tx;        /* frames the shim moved to the chip */
+  uint32_t shim_rx;        /* and from it */
+  uint32_t shim_rx_ring_full; /* polls that left data in the chip: the RX ring was full */
+  uint32_t shim_sdio_errors;
+  uint32_t shim_last_error;/* SDIO STAT1 error bits | step << 16 */
+  uint32_t shim_last_int;  /* the chip's HOST_INT_STATUS at the last poll */
+  uint32_t shim_paused_wifi; /* VBlanks skipped: the game used its DS wireless */
+  uint32_t shim_paused_card; /* VBlanks skipped: the card engine had an SD read in flight */
+  uint32_t arm9_rx;        /* frames the ARM9 took from the ring */
+  uint32_t arm9_tx;        /* frames the ARM9 put into it */
+  uint32_t arm9_tx_drops;  /* frames dropped: the TX ring was full */
+  uint32_t rejoins;        /* associations the module started itself */
+  uint8_t  tx_queued;      /* TX ring slots the ARM7 hasn't taken yet (of 4) */
+  uint8_t  rx_queued;      /* RX ring slots the ARM9 hasn't taken yet (of 8) */
+  uint8_t  shim_flags;     /* bit 0 attached (the ARM7 owns the chip), 1 dead (it gave up), 2 run */
+  uint8_t  join;           /* the association: 0 up, 1 leaving, 2 waiting, 3 joining, 4 keying, 5 given up */
+} dss_link_status_t;       /* 60 */
+
 /* DSS_T_CODE: 48 bytes of the game's IRQ dispatcher code, sent once a game
  * (the dispatcher and OS_IrqHandler_ThreadSwitch), so an unrecognised one
  * can be looked at from the phone's log. */

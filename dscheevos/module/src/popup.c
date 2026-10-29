@@ -336,6 +336,35 @@ static int known(uint16_t id)
   return 0;
 }
 
+/* Why a new pop-up can't be queued now (DSS_POPUP_WHY_*), 0 if it can. */
+static uint8_t queue_refusal(void)
+{
+  if (g_standdown)
+    return g_standdown;
+  if (g_mode == DSS_DISPLAY_OFF)
+    return DSS_POPUP_WHY_OFF;
+  if (g_queue_count >= QUEUE_MAX)
+    return DSS_POPUP_WHY_BUSY;
+  return 0;
+}
+
+/* Into the queue, the phone told it is queued. */
+static void enqueue(const popup_t* p)
+{
+  popup_t* q = &g_queue[g_queue_count];
+  if (!dscm_popup_active) {
+    /* the screen is watched from now on (ticks run only while active) */
+    g_screen_last = POWCNT1 & POWCNT1_TOP;
+    g_screen_frames = 0;
+    dscm_popup_active = 1;
+  }
+  *q = *p;
+  q->phase = P_QUEUED;
+  q->st.edge = 0;       /* the bottom edge only, for now */
+  set_state(q, DSS_POPUP_QUEUED, DSS_POPUP_WHY_NONE);
+  g_queue_count++;
+}
+
 void dscm_popup_on_popup(const uint8_t* body, uint16_t len)
 {
   static popup_t p;     /* a few hundred bytes: off the module's small stack */
@@ -363,32 +392,39 @@ void dscm_popup_on_popup(const uint8_t* body, uint16_t len)
   at = (uint16_t)(at + n);
   if (!(n = take_string(body + at, (uint16_t)(len - at), p.value, DSS_POPUP_VALUE_MAX))) goto bad;
 
-  if (g_standdown) {
-    refuse(p.st.popup_id, g_standdown);
+  if ((n = queue_refusal())) {
+    refuse(p.st.popup_id, (uint8_t)n);
     return;
   }
-  if (g_mode == DSS_DISPLAY_OFF) {
-    refuse(p.st.popup_id, DSS_POPUP_WHY_OFF);
-    return;
-  }
-  if (g_queue_count >= QUEUE_MAX) {
-    refuse(p.st.popup_id, DSS_POPUP_WHY_BUSY);
-    return;
-  }
-  p.phase = P_QUEUED;
-  p.st.edge = 0;       /* the bottom edge only, for now */
-  if (!dscm_popup_active) {
-    /* the screen is watched from now on (ticks run only while active) */
-    g_screen_last = POWCNT1 & POWCNT1_TOP;
-    g_screen_frames = 0;
-    dscm_popup_active = 1;
-  }
-  g_queue[g_queue_count] = p;
-  set_state(&g_queue[g_queue_count], DSS_POPUP_QUEUED, DSS_POPUP_WHY_NONE);
-  g_queue_count++;
+  enqueue(&p);
   return;
 bad:
   refuse(p.st.popup_id, DSS_POPUP_WHY_BAD);
+}
+
+void dscm_popup_set_mode(uint8_t mode);
+
+/* A pop-up of the console's own, for when no phone can send one (the link to
+ * it lost): shown like the phone's, its states going nowhere. A dry run the
+ * phone asked for turns on: with the phone gone, nobody reads the counters. */
+void dscm_popup_local(const char* title, const char* detail, const char* value)
+{
+  static popup_t p;
+  static uint16_t id = 0xFF00;                 /* above the phone's ids */
+  if (g_mode == DSS_DISPLAY_DRY || g_mode == DSS_DISPLAY_NOOP)
+    dscm_popup_set_mode(DSS_DISPLAY_ON);
+  if (queue_refusal())
+    return;
+  memset(&p, 0, sizeof(p));
+  p.st.popup_id = id;
+  id = (uint16_t)(id == 0xFFFF ? 0xFF00 : id + 1);
+  p.style = DSS_POPUP_TOAST;
+  p.hold = 600;                                /* 10 s: time to read it */
+  strncpy(p.label, "Cheevotron", DSS_POPUP_LABEL_MAX);
+  strncpy(p.title, title, DSS_POPUP_TITLE_MAX);
+  strncpy(p.detail, detail, DSS_POPUP_DETAIL_MAX);
+  strncpy(p.value, value, DSS_POPUP_VALUE_MAX);
+  enqueue(&p);
 }
 
 static badge_slot_t* badge_find(uint16_t id)

@@ -18,6 +18,7 @@
 #include "lwip/ip_addr.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 /* module.c */
@@ -35,6 +36,7 @@ void dscm_popup_on_popup(const uint8_t* body, uint16_t len);
 void dscm_popup_on_badge(const uint8_t* body, uint16_t len);
 void dscm_popup_set_mode(uint8_t mode);
 void dscm_popup_status(dss_display_status_t* out);
+void dscm_popup_local(const char* title, const char* detail, const char* value);
 
 /* ---- state ---- */
 
@@ -65,6 +67,8 @@ static int       g_phone_known;        /* g_phone_ip: the launcher's phone, a PR
 static uint32_t  g_last_phone_ms;
 static uint32_t  g_last_hello_ms;
 static int       g_force_full;
+static uint32_t  g_lost_ms;            /* when a pairing timed out (0: none since the last) */
+static uint8_t   g_lost_shown;         /* "Phone link lost" notices shown since */
 
 /* HELLO payload, filled at start */
 static dss_hello_t g_hello;
@@ -349,6 +353,7 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
         if (type == DSS_T_TABLE) {
           g_paired = 1;
           g_session = session;
+          g_lost_ms = 0;
           ip_addr_copy(g_phone_ip, *addr);
           g_phone_port = port;
           g_phone_known = 1;
@@ -419,6 +424,29 @@ int dscm_stream_net_init(void)
   return 0;
 }
 
+/* The console's own notice that the phone is gone, with the link's state in
+ * short (the phone can't log it any more): N net state, P the ARM7 shim's
+ * polls (moving: the shim runs), E SDIO errors, Q TX/RX slots waiting, D TX
+ * frames dropped, J association state, F shim flags (1 attached, 2 dead, 4
+ * run). The value counts the notices: three, at the loss and 30 s and 90 s
+ * after, so the numbers' movement shows too. */
+static void lost_notice(uint32_t now_ms)
+{
+  static const uint32_t at_ms[3] = { 0, 30000, 90000 };
+  dss_link_status_t l;
+  char detail[48], value[8];
+  if (!g_lost_ms || g_lost_shown >= 3 || now_ms - g_lost_ms < at_ms[g_lost_shown])
+    return;
+  link_diag(&l);
+  snprintf(detail, sizeof(detail), "N%u P%u E%u Q%u/%u D%u J%u F%u",
+           (unsigned)net_state(), (unsigned)(l.shim_polls % 100000u), (unsigned)l.shim_sdio_errors,
+           (unsigned)l.tx_queued, (unsigned)l.rx_queued, (unsigned)l.arm9_tx_drops, (unsigned)l.join,
+           (unsigned)l.shim_flags);
+  g_lost_shown++;
+  snprintf(value, sizeof(value), "#%u", (unsigned)g_lost_shown);
+  dscm_popup_local("Phone link lost", detail, value);
+}
+
 /* Called each idle pass after net_service(now_ms): the recv callback has
  * already run inside it. Keeps the pairing alive and broadcasts HELLO. */
 void dscm_stream_service(uint32_t now_ms)
@@ -431,9 +459,12 @@ void dscm_stream_service(uint32_t now_ms)
       g_paired = 0;
       g_session = 0;
       g_have_last = 0;
+      g_lost_ms = now_ms ? now_ms : 1;
+      g_lost_shown = 0;
     }
     return;
   }
+  lost_notice(now_ms);
   if (now_ms - g_last_hello_ms >= DSS_HELLO_MS) {
     g_last_hello_ms = now_ms;
     send_hello();
@@ -452,24 +483,28 @@ void dscm_stream_frame(uint32_t frame)
 /* STATUS for the phone's cart screen (every DSS_FULL_EVERY frames). */
 void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_max)
 {
-  uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_status_t) + sizeof(dss_display_status_t)];
+  /* static: about 500 bytes, off the module's small stack (idle path only) */
+  static uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_status_t) + sizeof(dss_display_status_t) + sizeof(dss_link_status_t)];
+  static dss_display_status_t d;
+  static dss_link_status_t l;
   dss_status_t s;
-  dss_display_status_t d;
   uint8_t* body;
   if (!g_paired)
     return;
+  link_diag(&l);
   memset(&s, 0, sizeof(s));
   s.vblank = frame;
   s.frames_sent = g_frames_sent_total;
   s.frames_stale = g_frames_stale_total;
   s.peeks_answered = g_peeks_answered;
-  s.net_rejoins = 0;
+  s.net_rejoins = l.rejoins;
   s.net_state = (uint8_t)net_state;
-  s.shim_dead = 0;
+  s.shim_dead = (uint8_t)((l.shim_flags & 2) ? 1 : 0);
   s.idle_lines_max = idle_lines_max;
   dscm_popup_status(&d);
-  body = header(buf, DSS_T_STATUS, g_session, (uint16_t)(sizeof(dss_status_t) + sizeof(d)));
+  body = header(buf, DSS_T_STATUS, g_session, (uint16_t)(sizeof(dss_status_t) + sizeof(d) + sizeof(l)));
   memcpy(body, &s, sizeof(dss_status_t));
   memcpy(body + sizeof(dss_status_t), &d, sizeof(d));   /* DSS_CAP_POPUP: the strip's counters */
+  memcpy(body + sizeof(dss_status_t) + sizeof(d), &l, sizeof(l));   /* the Wi-Fi link's */
   send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)sizeof(buf));
 }
