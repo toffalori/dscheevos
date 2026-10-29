@@ -407,7 +407,7 @@ typedef struct __attribute__((packed)) {
   uint32_t shim_idle_polls;/* polls with nothing to do */
   uint32_t shim_tx;        /* frames the shim moved to the chip */
   uint32_t shim_rx;        /* and from it */
-  uint32_t shim_rx_ring_full; /* polls that left data in the chip: the RX ring was full */
+  uint32_t shim_rx_ring_full; /* RX frames thrown away: the RX ring was full (read out of the chip all the same) */
   uint32_t shim_sdio_errors;
   uint32_t shim_last_error;/* SDIO STAT1 error bits | step << 16 */
   uint32_t shim_last_int;  /* the chip's HOST_INT_STATUS at the last poll */

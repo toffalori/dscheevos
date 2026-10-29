@@ -22,6 +22,8 @@ uint32_t dscm_rec_written(void);
 uint32_t dscm_rec_end_frame(void);
 uint32_t dscm_rec_find(uint32_t from_frame, int* gap);
 uint32_t dscm_rec_read(uint32_t abs_offset, uint8_t* out, uint32_t len);
+dscm_rec_t* dscm_rec_header(void);
+void dscm_rec_note(uint32_t line, const char* text);
 
 #define FRAMES 6000
 #define WORDS  40

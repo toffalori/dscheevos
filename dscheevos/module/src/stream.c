@@ -41,6 +41,7 @@ void dscm_popup_local(const char* title, const char* detail, const char* value);
 /* record.c: the recording the phone replays after a drop */
 void dscm_rec_init(void* ring, uint32_t size, uint16_t run, const char* hash);
 dscm_rec_t* dscm_rec_header(void);
+void dscm_rec_note(uint32_t line, const char* text);
 void dscm_rec_frame(uint32_t frame, const uint32_t* addr, uint16_t count, uint16_t generation, const uint8_t* cur);
 uint32_t dscm_rec_written(void);
 uint32_t dscm_rec_end_frame(void);
@@ -573,11 +574,45 @@ static void lost_notice(uint32_t now_ms)
   dscm_popup_local("Phone not reachable", g_recording ? "Recording: unlocks will follow" : "Achievements paused for now", value);
 }
 
+/* The link in one line of text in the recording's header on the SD card
+ * (record.c dscm_rec_note), for a run the phone stopped hearing: line 0 the
+ * latest (at the STATUS cadence and whenever the link goes up or down), line
+ * 1 as it was when the pairing was lost. R K J C as in the notice, plus the
+ * 802.11 code after R; L the latest disconnect, D disconnect events, T
+ * association/handshake timeouts, F shim flags (1 attached, 2 dead, 4 run),
+ * q TX/RX ring slots in use; then the shim's counters (full: RX frames thrown
+ * away with the ring full; int: the chip's last interrupt status; pw: VBlanks
+ * paused for the game's DS wireless). */
+static void link_note(uint32_t line, uint32_t now_ms)
+{
+  static char text[DSCM_REC_NOTE_BYTES];
+  static dss_link_status_t l;
+  if (!g_recording)
+    return;
+  link_diag(&l);
+  snprintf(text, sizeof(text),
+           "%s t=%us R%u/%u L%u/%u K%u J%u C%u D%u T%u/%u F%u rej%u q%u/%u polls%u rx%u tx%u full%u sdio%u/%x int%x pw%u",
+           line ? "lost" : "now", (unsigned)(now_ms / 1000), (unsigned)l.cause_reason, (unsigned)l.cause_proto,
+           (unsigned)l.last_reason, (unsigned)l.last_proto, (unsigned)l.need_ptk, (unsigned)l.join,
+           (unsigned)l.connect_events, (unsigned)l.disc_events, (unsigned)l.join_timeouts, (unsigned)l.key_timeouts,
+           (unsigned)l.shim_flags, (unsigned)l.rejoins, (unsigned)l.tx_queued, (unsigned)l.rx_queued,
+           (unsigned)l.shim_polls, (unsigned)l.shim_rx, (unsigned)l.shim_tx, (unsigned)l.shim_rx_ring_full,
+           (unsigned)l.shim_sdio_errors, (unsigned)l.shim_last_error, (unsigned)l.shim_last_int,
+           (unsigned)l.shim_paused_wifi);
+  dscm_rec_note(line, text);
+}
+
 /* Called each idle pass after net_service(now_ms): the recv callback has
  * already run inside it. Keeps the pairing alive and broadcasts HELLO. */
 void dscm_stream_service(uint32_t now_ms)
 {
+  static int link_was_up = 1;
+  const int link_is_up = link_up();
   g_now_ms = now_ms;
+  if (link_is_up != link_was_up) {
+    link_was_up = link_is_up;
+    link_note(0, now_ms);
+  }
   if (g_last_phone_ms == 1)         /* the callback heard from the phone this pass */
     g_last_phone_ms = now_ms ? now_ms : 1;
   dscm_g_status.net_detail = g_paired ? g_session : 0;   /* nonzero in the menu = paired */
@@ -593,6 +628,7 @@ void dscm_stream_service(uint32_t now_ms)
       g_replaying = 0;
       g_lost_ms = now_ms ? now_ms : 1;
       g_lost_shown = 0;
+      link_note(1, now_ms);
     }
     return;
   }
@@ -629,6 +665,7 @@ void dscm_stream_status(uint32_t frame, uint32_t net_state, uint32_t idle_lines_
   static dss_link_status_t l;
   dss_status_t s;
   uint8_t* body;
+  link_note(0, g_now_ms);
   if (!g_paired)
     return;
   link_diag(&l);

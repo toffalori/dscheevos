@@ -9,7 +9,8 @@
  *        any endpoint: 1 = WMI control, 2 = best-effort data). The shim pads
  *        to the 128-byte SDIO block size and writes them to mailbox 0.
  *  - RX: the shim copies every HTC frame the chip has for the host (WMI
- *        events, data frames, credit reports) into an RX slot, unparsed.
+ *        events, data frames, credit reports) into an RX slot, unparsed;
+ *        with the ring full it reads them out and throws them away.
  * All protocol work (Ethernet, WMI, EAPOL, credits) happens on the ARM9.
  *
  * Single producer / single consumer per ring; indices only ever increase
@@ -46,7 +47,7 @@ typedef struct shim_stats_t {
   uint32_t polls;                  /* shim_poll() calls while running */
   uint32_t idle_polls;             /* polls that found nothing to do */
   uint32_t tx_frames, rx_frames;
-  uint32_t rx_ring_full;           /* polls that left data in the chip: ring full */
+  uint32_t rx_ring_full;           /* RX frames thrown away: the ring was full (read out of the chip all the same) */
   uint32_t sdio_errors;
   uint32_t last_error;             /* STAT1 error bits | step << 16 */
   uint32_t last_int_status;        /* F1 HOST_INT_STATUS of the last poll */
@@ -68,7 +69,7 @@ typedef struct shim_shared_t {
   volatile uint32_t attached SHIM_LINE;  /* 1 once the ARM7 owns the chip */
   volatile uint32_t tx_tail;
   volatile uint32_t rx_head;
-  volatile uint32_t dead;                /* 1: chip stopped answering, shim gave up */
+  volatile uint32_t dead;                /* 1: the chip stopped answering (polls go on, a second apart) */
   volatile shim_stats_t stats;
   /* slots */
   shim_slot_tx_t tx[SHIM_TX_SLOTS];      /* ARM9 writes */

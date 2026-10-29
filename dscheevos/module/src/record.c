@@ -89,6 +89,20 @@ dscm_rec_t* dscm_rec_header(void)
   return g_size ? &g_rec : NULL;
 }
 
+/* A line of text into the header sector's notes (DSCM_REC_NOTE_OFFSET): the
+ * ARM7 writes it to the SD card with its next header. Only the note's own
+ * cache lines are cleaned; the header's start is the ARM7's. */
+void dscm_rec_note(uint32_t line, const char* text)
+{
+  uint8_t* d;
+  if (!g_size || line >= DSCM_REC_NOTES)
+    return;
+  d = g_rec.sd_header + DSCM_REC_NOTE_OFFSET + line * DSCM_REC_NOTE_BYTES;
+  memset(d, 0, DSCM_REC_NOTE_BYTES);
+  memcpy(d, text, strnlen(text, DSCM_REC_NOTE_BYTES - 1));
+  dscm_dc_clean(d, DSCM_REC_NOTE_BYTES);
+}
+
 /* A segment: padding to the next sector, then the table and every word's
  * value as of `base_frame` (no frame is evaluated for it). */
 static void segment(uint32_t base_frame, const uint32_t* addr, uint16_t count, uint16_t generation, const uint8_t* vals)

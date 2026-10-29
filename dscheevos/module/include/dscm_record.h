@@ -74,6 +74,15 @@ typedef struct dscm_rec_t {
 
 typedef char dscm_rec_size_check[sizeof(dscm_rec_t) == 640 ? 1 : -1];
 
+/* The header sector after its dscm_recslot_t is the module's: DSCM_REC_NOTES
+ * lines of text about the run (the Wi-Fi link's state, record.c dscm_rec_note),
+ * for whoever reads the SD card after a run the phone stopped hearing. The
+ * ARM7 clears them with the rest at a run's start and never writes them after;
+ * they sit in cache lines of their own (dscm_rec_t offset 128 + 96 = 224). */
+#define DSCM_REC_NOTE_OFFSET 96u
+#define DSCM_REC_NOTE_BYTES  192u
+#define DSCM_REC_NOTES       2u
+
 #define DSCM_REC_SD_OFF     0         /* the ARM7 hasn't taken the ring up: no file (none made, fragmented, not a
                                          stream session), or not yet */
 #define DSCM_REC_SD_ON      2         /* mirroring */
