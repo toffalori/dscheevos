@@ -159,7 +159,7 @@ $(BUILD)/hot-layout.txt: $(BUILD)/dscheevos9.elf
 	@rm -f $@.nm
 hotcheck: $(BUILD)/hot-layout.txt
 	@if diff -u hot-layout.ref $< > $(BUILD)/hot-layout.diff; then echo "hotcheck: hot layout unchanged ($$(wc -l < $<) symbols)"; \
-	else head -40 $(BUILD)/hot-layout.diff; echo "hotcheck: FAIL: the hot code or constants moved (diff above, $(BUILD)/hot-layout.diff)."; \
+	else cat $(BUILD)/hot-layout.diff; echo "hotcheck: FAIL: the hot code or constants moved (diff above, $(BUILD)/hot-layout.diff)."; \
 	  echo "  If the change is meant to touch hot code: measure the game cost, then make -C dscheevos/module hot-accept"; exit 1; fi
 hot-accept: $(BUILD)/hot-layout.txt
 	cp $< hot-layout.ref
