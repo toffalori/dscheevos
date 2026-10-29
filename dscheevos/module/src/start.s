@@ -844,10 +844,8 @@ line_vcount:
 	beq	line_skip
 	tst	r2, #8
 	beq	line_skip
-	mov	r0, #2
-	tst	r1, #2                      @ an H-Blank IRQ: the spin would hold it off
-	tstne	r2, #0x10
-	bne	line_skip
+	@ (a game's H-Blank IRQ is no guard: the spin and the hold keep it off
+	@ through the band's lines, and its handler runs once at the VBlank)
 	mov	r0, #4
 	ldr	r1, [r12]                   @ DISPCNT: mode 1, no forced blank
 	tst	r1, #0x80

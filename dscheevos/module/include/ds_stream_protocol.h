@@ -346,7 +346,7 @@ typedef struct __attribute__((packed)) {
   uint16_t hold_out;       /* CPU holds (DSS_DISPLAY_ON_HOLD) ended by their bound or an odd VCOUNT, the band
                               left up (saturates; was a FIFO depth measurement, then 0) */
   uint8_t  nwram;          /* the last band was fed from shared WRAM (else main RAM) */
-  uint8_t  reserved3;
+  uint8_t  hblank_bands;   /* line-path bands with the game's H-Blank IRQ on, held off through the band (saturates) */
   /* while pop-ups are up, why frames went without the band */
   uint32_t shown_bits;     /* the last 32 frames, bit 0 the newest: 1 = the band was drawn (whole or cut) */
   uint32_t wake_early;     /* no band, though the game was idle in time (an IRQ, a skip reason) */
@@ -369,7 +369,7 @@ typedef struct __attribute__((packed)) {
   uint8_t  line_stage;     /* 0 watch (our VCOUNT IRQ only), 1 dry (the feed, the game's mode written), 2 on */
   uint8_t  line_standdown; /* why the VCOUNT IRQ was left to the game: 1 LYC changed, 2 LYC bit 8, 3 its
                               table slot changed, 4 it kept turning ours off */
-  uint8_t  line_skipwhy;   /* guards that held a band back (bits): 1 no VBlank IRQ, 2 an H-Blank IRQ, 4 display
+  uint8_t  line_skipwhy;   /* guards that held a band back (bits): 1 no VBlank IRQ, 2 an H-Blank IRQ (older builds), 4 display
                               mode or forced blank, 8 fade or capture, 16 the other screen, 32 NDMA2 busy, 64 a
                               legacy DMA feeding the FIFO */
   uint32_t line_vc;        /* our VCOUNT IRQs */
@@ -383,7 +383,9 @@ typedef struct __attribute__((packed)) {
   uint16_t line_spin;      /* the most spin loops to the band's H-Blank */
   uint16_t dispmode_fixed; /* GX_DispOff's saved mode found 3 and put back to 1 */
   uint8_t  dispoff;        /* GX_DispOff in the game: 0 looking, 1 found, 2 not found */
-  uint8_t  reserved7;
+  uint8_t  line_refused;   /* why the line path wasn't installed at the last try (bits): 1 vectors/DTCM or the IRQ
+                              vector, 2 the dispatcher or its table, 4 no shared-WRAM source, 8 GX_DispOff, 16 the
+                              game feeds the display FIFO, 32 the game's VCOUNT IRQ, 64 no VBlank IRQ, 128 not mode 1 */
   /* the line path's feed: what else used the bus around a band (a FIFO
      underrun shifts the rest of the band to the right), and the hold test */
   uint32_t feed_dma_seen;  /* seen busy at a band's start or its VBlank (bits): 0-3 DMA0-3, 4-7 NDMA0-3 (6 never:

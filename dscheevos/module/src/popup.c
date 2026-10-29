@@ -1242,29 +1242,54 @@ static void leak_watch(void)
 
 /* The line path on, with IRQs masked: the wrapper on the vector for good,
  * the VCOUNT IRQ ours (IF first cleared, so no stale match fires). Only when
- * the game leaves the VCOUNT IRQ alone, its VBlank IRQ is on, no H-Blank IRQ
- * runs (the spin would hold it off), its dispatcher is NitroSDK's (for the
- * VCOUNT slot of its table) and GX_DispOff is known. 1 if installed. */
+ * the game leaves the VCOUNT IRQ alone, its VBlank IRQ is on, its dispatcher
+ * is NitroSDK's (for the VCOUNT slot of its table) and GX_DispOff is known.
+ * A game's H-Blank IRQ (HeartGold keeps one on) is held off through the band's
+ * lines, as the whole CPU is (DSS_DISPLAY_ON_HOLD): its handler runs once at
+ * the VBlank instead, and a raster effect misses those lines while a pop-up
+ * is up. 1 if installed; else g_stats.line_refused says why (LINE_REFUSED_*). */
+#define LINE_REFUSED_VECTOR    0x01   /* CP15 high vectors or DTCM off, or the IRQ vector not the game's */
+#define LINE_REFUSED_DISPATCH  0x02   /* the dispatcher not NitroSDK's, or its table out of reach */
+#define LINE_REFUSED_SOURCE    0x04   /* the band can't come from shared WRAM */
+#define LINE_REFUSED_DISPOFF   0x08   /* GX_DispOff not found, or its saved mode odd */
+#define LINE_REFUSED_FIFO_DMA  0x10   /* the game feeds the display FIFO itself */
+#define LINE_REFUSED_VCOUNT    0x20   /* the game uses the VCOUNT IRQ */
+#define LINE_REFUSED_VBLANK    0x40   /* no VBlank IRQ */
+#define LINE_REFUSED_MODE      0x80   /* the display not in mode 1 */
 static int line_install(void)
 {
   volatile uint32_t* vec = irq_vector();
   const uint32_t ctl = dscm_cp15_control();
   uint32_t cpsr, cur, i;
-  int ok;
-  if (g_armed || g_dispoff.state != 1)
+  uint8_t why = 0;
+  if (g_armed)
     return 0;
+  if (g_dispoff.state != 1) {
+    g_stats.line_refused = LINE_REFUSED_DISPOFF;
+    return 0;
+  }
   cpsr = dscm_irq_off();
   cur = *vec;
-  ok = (ctl & (1u << 13)) && (ctl & (1u << 16)) && cur != WRAPPER
-       && (cur - 0x01000000u < 0x01000000u || cur - 0x02000000u < 0x01000000u)
-       && (dispatcher_known(cur), (g_disp.variant & (DISP_V1 | DISP_V2)) != 0)
-       && (in_dtcm(g_disp.table, 22 * 4) || in_main_ram(g_disp.table)) && !(g_disp.table & 3)
-       && (g_src == NW_BASE || POPUP_LINE_ANY_SOURCE)   /* main RAM starves the feed while the game works */
-       && g_dispoff.mode && CODE16(g_dispoff.mode) != 3 && !game_fifo_dma()
-       && !(REG_IE & 4) && !(DISPSTAT & 0x20) && !(DISPSTAT & 0x80)
-       && (REG_IE & 1) && (DISPSTAT & 0x08) && !((REG_IE & 2) && (DISPSTAT & 0x10))
-       && (DISPCNT & MODE_MASK) == MODE_1;
-  if (!ok) {
+  if (!(ctl & (1u << 13)) || !(ctl & (1u << 16)) || cur == WRAPPER
+      || (cur - 0x01000000u >= 0x01000000u && cur - 0x02000000u >= 0x01000000u))
+    why |= LINE_REFUSED_VECTOR;
+  else if ((dispatcher_known(cur), (g_disp.variant & (DISP_V1 | DISP_V2)) == 0)
+           || !(in_dtcm(g_disp.table, 22 * 4) || in_main_ram(g_disp.table)) || (g_disp.table & 3))
+    why |= LINE_REFUSED_DISPATCH;
+  if (g_src != NW_BASE && !POPUP_LINE_ANY_SOURCE)   /* main RAM starves the feed while the game works */
+    why |= LINE_REFUSED_SOURCE;
+  if (!g_dispoff.mode || CODE16(g_dispoff.mode) == 3)
+    why |= LINE_REFUSED_DISPOFF;
+  if (game_fifo_dma())
+    why |= LINE_REFUSED_FIFO_DMA;
+  if ((REG_IE & 4) || (DISPSTAT & 0x20) || (DISPSTAT & 0x80))
+    why |= LINE_REFUSED_VCOUNT;
+  if (!(REG_IE & 1) || !(DISPSTAT & 0x08))
+    why |= LINE_REFUSED_VBLANK;
+  if ((DISPCNT & MODE_MASK) != MODE_1)
+    why |= LINE_REFUSED_MODE;
+  g_stats.line_refused = why;
+  if (why) {
     dscm_irq_restore(cpsr);
     return 0;
   }
@@ -1332,6 +1357,8 @@ static void line_publish(int rows)
    * no slowdown seen) */
   LW(LW_HOLD) = g_mode == DSS_DISPLAY_ON || g_mode == DSS_DISPLAY_ON_HOLD;
   if (rows > 0) {
+    if ((REG_IE & 2) && (DISPSTAT & 0x10) && g_stats.hblank_bands < 0xFF)
+      g_stats.hblank_bands++;                  /* the game's H-Blank IRQ held off through this band */
     LW(LW_NFIRST) = (uint32_t)(192 - rows);
     LW(LW_NSRC) = g_src + (uint32_t)(g_rows - rows) * 512;
     LW(LW_NWORDS) = (uint32_t)(rows + MARGIN) * 128;
