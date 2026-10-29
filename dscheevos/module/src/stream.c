@@ -424,29 +424,26 @@ int dscm_stream_net_init(void)
   return 0;
 }
 
-/* The console's own notice that the phone is gone, with the link's state in
- * short (the phone can't log it any more): R the firmware's reason / 802.11
- * code of the disconnect that took the link down, L the latest disconnect's,
- * K AP key messages we couldn't answer (a group rekey: we left to rejoin), C
- * connect events (rejoins associating), T association / handshake timeouts,
- * J association state, P the ARM7 shim's polls (moving: the shim runs). The
- * value counts the notices: three, at the loss and 30 s and 90 s after, so
- * the numbers' movement shows too. */
+/* The console's own notice that the phone is gone (no unlocks are checked
+ * until it is back), at the loss and again 2 minutes on if it still is. The
+ * value at the end of its first line is the link in short, for when the
+ * phone never hears from us again: R the firmware's reason for the
+ * disconnect that took the link down (2 link lost, 4 the AP dropped us...),
+ * K AP key messages we couldn't answer (a group rekey: we left to rejoin), J
+ * the association state (0 up .. 5 given up), C connect events (rejoins that
+ * associated). The phone logs everything else once it hears from us again. */
 static void lost_notice(uint32_t now_ms)
 {
-  static const uint32_t at_ms[3] = { 0, 30000, 90000 };
+  static const uint32_t at_ms[2] = { 0, 120000 };
   dss_link_status_t l;
-  char detail[48], value[8];
-  if (!g_lost_ms || g_lost_shown >= 3 || now_ms - g_lost_ms < at_ms[g_lost_shown])
+  char value[DSS_POPUP_VALUE_MAX + 1];
+  if (!g_lost_ms || g_lost_shown >= 2 || now_ms - g_lost_ms < at_ms[g_lost_shown])
     return;
   link_diag(&l);
-  snprintf(detail, sizeof(detail), "R%u/%u L%u/%u K%u C%u T%u/%u J%u P%u",
-           (unsigned)l.cause_reason, (unsigned)l.cause_proto, (unsigned)l.last_reason, (unsigned)l.last_proto,
-           (unsigned)l.need_ptk, (unsigned)l.connect_events, (unsigned)l.join_timeouts, (unsigned)l.key_timeouts,
-           (unsigned)l.join, (unsigned)(l.shim_polls % 100000u));
+  snprintf(value, sizeof(value), "R%u K%u J%u C%u", (unsigned)l.cause_reason, (unsigned)l.need_ptk, (unsigned)l.join,
+           (unsigned)l.connect_events);
   g_lost_shown++;
-  snprintf(value, sizeof(value), "#%u", (unsigned)g_lost_shown);
-  dscm_popup_local("Phone link lost", detail, value);
+  dscm_popup_local("Phone not reachable", "Achievements paused for now", value);
 }
 
 /* Called each idle pass after net_service(now_ms): the recv callback has

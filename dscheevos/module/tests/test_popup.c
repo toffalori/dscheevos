@@ -463,7 +463,7 @@ int main(int argc, char** argv)
 
   /* the console's own notice (the phone gone): shown even from a dry run */
   dscm_popup_set_mode(DSS_DISPLAY_DRY);
-  dscm_popup_local("Phone link lost", "N2 P12345 E0 Q4/0 D12 J0 F5", "#1");
+  dscm_popup_local("Phone not reachable", "Achievements paused for now", "R2 K0 J3 C1");
   if (g_mode != DSS_DISPLAY_ON) { printf("FAIL: local notice left the dry run on\n"); return 1; }
   snprintf(path, sizeof(path), "%s/lost.ppm", argv[2]);
   run(path, TOAST_ROWS, 1);
