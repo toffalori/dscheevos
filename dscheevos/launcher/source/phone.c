@@ -17,9 +17,13 @@ static void put16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(
 static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 
 /* A replay the phone is to start or go on with must come within this many
- * frames: after READY (or the last piece sent), else the game starts. */
+ * frames: after READY (or the last piece sent), else the game starts; and
+ * the whole replay gets REPLAY_MAX_FRAMES from the phone's first word,
+ * however often it asks. B cuts it short. */
 #define REPLAY_GRACE_FRAMES   60
 #define REPLAY_TIMEOUT_FRAMES ((int)(DSS_REPLAY_TIMEOUT_MS * 60 / 1000))
+#define REPLAY_MAX_FRAMES     (20 * 60)
+#define PLAIN_HELLO_FRAMES    (3 * 60)    /* the game's own HELLO after an offered recording: its READY by then */
 
 void phone_ip_text(uint32_t ip, char out[16])
 {
@@ -130,9 +134,13 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
   struct sockaddr_in any, to, from;
   int fd, on = 1, frame, found = -1, stop = 0, told = 0;
   int replay_until = -1;   /* the frame by which the phone must ask for (more of) the recording; -1: not waiting */
+  int replay_end = -1;     /* the frame the replay ends at the latest, from the phone's first word */
+  int plain_until = -1;    /* >= 0: the HELLO out there is the game's own, after the recording's; its READY by then */
+  int offered;
 
   if (rec && rec->done)
     rec = NULL;
+  offered = rec != NULL;
   make_hello(hello, rom_path, hash, rec);
   fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) {
@@ -151,10 +159,35 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
   }
 
   for (frame = 0; !stop; frame++) {
-    if (found < 0 && timeout_frames >= 0 && frame >= timeout_frames)
+    if (plain_until >= 0) {
+      /* the game's HELLO after the recording's: its READY, or the first one stands */
+      if (found == 0 || frame >= plain_until) {
+        found = 0;
+        break;
+      }
+    } else if (found < 0 && timeout_frames >= 0 && frame >= timeout_frames) {
       break;
-    if (found == 0 && (replay_until < 0 || frame >= replay_until))
-      break;
+    } else if (found == 0 && (replay_until < 0 || frame >= replay_until)) {
+      if (!offered)
+        break;
+      /* the READY so far answered the recording's game: say HELLO for the game
+       * about to start, and take its READY (name, login) for the screen */
+      rec = NULL;
+      offered = 0;
+      make_hello(hello, rom_path, hash, NULL);
+      plain_until = frame + PLAIN_HELLO_FRAMES;
+      found = -1;
+    }
+    if (rec && replay_until >= 0) {
+      /* B cuts the replay short (held: a scan here must not eat the press
+       * each_frame looks for) */
+      scanKeys();
+      if (keysHeld() & KEY_B) {
+        log_line("phone: replay cut short by B");
+        rec = NULL;
+        replay_until = found == 0 ? frame : -1;
+      }
+    }
     if (found < 0 && frame % 15 == 0) {
       /* to everyone, and straight to the phone of last time: with its screen
        * off a phone drops broadcasts but still takes unicast */
@@ -190,8 +223,11 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
             memcpy(out->name, body + 4, length - 4 < 28 ? length - 4 : 28);
           found = 0;
           /* the phone may want the recording first: a moment for it to ask */
-          if (rec && !rec->done && replay_until < 0)
+          if (rec && !rec->done && replay_until < 0) {
+            if (replay_end < 0)
+              replay_end = frame + REPLAY_MAX_FRAMES;
             replay_until = frame + REPLAY_GRACE_FRAMES;
+          }
         }
       } else if (buf[2] == DSS_T_REPLAY_REQ && length >= sizeof(dss_replay_req_t) && rec) {
         dss_replay_req_t req;
@@ -201,8 +237,11 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
           told = 1;
         }
         send_piece(fd, rec, &req, &from);
-        if (req.run == rec->h.run)
+        if (req.run == rec->h.run) {
+          if (replay_end < 0)
+            replay_end = frame + REPLAY_MAX_FRAMES;
           replay_until = rec->done ? -1 : frame + REPLAY_TIMEOUT_FRAMES;
+        }
       } else if (buf[2] == DSS_T_REPLAY_DONE && length >= sizeof(dss_replay_done_t) && rec) {
         dss_replay_done_t done;
         int r;
@@ -222,6 +261,14 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
           replay_until = frame + REPLAY_TIMEOUT_FRAMES;
         }
       }
+      /* however often the phone asks, the replay ends by replay_end */
+      if (rec && replay_until >= 0 && replay_end >= 0 && replay_until > replay_end) {
+        replay_until = replay_end;
+        if (frame >= replay_end && !rec->done) {
+          log_line("phone: replay cut short after %d s", REPLAY_MAX_FRAMES / 60);
+          rec = NULL;
+        }
+      }
     }
     if (each_frame)
       stop = each_frame();
@@ -231,8 +278,7 @@ int phone_find(const char* rom_path, const char* hash, uint32_t known_ip, int ti
   if (found == 0) {
     char ip[16];
     phone_ip_text(out->ip, ip);
-    log_line("phone: %s at %s, state %d, after %d frames%s", out->name, ip, out->state, frame,
-             rec ? (rec->done ? ", recording replayed" : rec->stream ? ", recording replay left unfinished" : ", recording not asked for") : "");
+    log_line("phone: %s at %s, state %d, after %d frames", out->name, ip, out->state, frame);
   } else {
     log_line("phone: no answer in %d frames%s", frame, stop ? " (stopped)" : "");
   }

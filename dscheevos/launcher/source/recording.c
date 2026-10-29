@@ -229,6 +229,12 @@ void recording_scan(recording_t* r)
         pos = end;                     /* cut by the end: the stream's last piece, nothing to replay from */
         break;
       }
+      if (r->segments && (int32_t)(rd32(at(r, pos + 8)) - r->seg_frame[r->segments - 1]) < 0) {
+        /* frames going backwards: what came before is newer data under old
+         * offsets (a power-off between a lap of the slot and its header);
+         * the recording starts here */
+        r->segments = 0;
+      }
       r->seg_offset[r->segments] = pos;
       r->seg_frame[r->segments] = rd32(at(r, pos + 8));
       r->segments++;
