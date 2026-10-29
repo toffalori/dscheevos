@@ -1326,7 +1326,11 @@ static void line_publish(int rows)
 {
   const uint32_t cpsr = dscm_irq_off();
   LW(LW_STAGE) = line_stage();
-  LW(LW_HOLD) = g_mode == DSS_DISPLAY_ON_HOLD;
+  /* on: the game's CPU held through the band's lines. A busy game's bus
+   * traffic starved the feed otherwise (rows shifted part-way down in its
+   * busy frames; A/B test in Super Mario 64 DS 2026-10-29: clean when held,
+   * no slowdown seen) */
+  LW(LW_HOLD) = g_mode == DSS_DISPLAY_ON || g_mode == DSS_DISPLAY_ON_HOLD;
   if (rows > 0) {
     LW(LW_NFIRST) = (uint32_t)(192 - rows);
     LW(LW_NSRC) = g_src + (uint32_t)(g_rows - rows) * 512;

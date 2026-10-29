@@ -70,11 +70,11 @@
 #define DSS_DISPLAY_OFF     0
 #define DSS_DISPLAY_DRY     1            /* guards and the IRQ wrapper only: no DMA, nothing on screen */
 #define DSS_DISPLAY_NOOP    2            /* also the DISPCNT writer, with the game's own value on every line */
-#define DSS_DISPLAY_ON      3            /* pop-ups on screen */
+#define DSS_DISPLAY_ON      3            /* pop-ups on screen (line path: the game's CPU held through the band) */
 #define DSS_DISPLAY_ON_REARM 4           /* test: on, and armed again in a frame an IRQ ended the band early */
 #define DSS_DISPLAY_ON_STRICT 5          /* on, but every IRQ ends the band (no IPC interrupt passes) */
-#define DSS_DISPLAY_ON_HOLD 6            /* test: on (line path), and the game's CPU held in our IRQ through the
-                                            band's lines (its geometry FIFO writes stall the bus, starving the feed) */
+#define DSS_DISPLAY_ON_HOLD 6            /* the same as DSS_DISPLAY_ON since the hold became its default (it was the
+                                            A/B test of holding the game's CPU in our IRQ through the band's lines) */
 
 /* DSS_T_CUE body[0]: what the phone unlocked, so the console can blink its LED */
 #define DSS_CUE_UNLOCK      0
@@ -342,7 +342,19 @@ typedef struct __attribute__((packed)) {
   uint8_t  rx_queued;      /* RX ring slots the ARM9 hasn't taken yet (of 8) */
   uint8_t  shim_flags;     /* bit 0 attached (the ARM7 owns the chip), 1 dead (it gave up), 2 run */
   uint8_t  join;           /* the association: 0 up, 1 leaving, 2 waiting, 3 joining, 4 keying, 5 given up */
-} dss_link_status_t;       /* 60 */
+  uint32_t disc_events;    /* the chip's disconnect events */
+  uint32_t connect_events; /* its connect events (our rejoins' associations) */
+  uint16_t cause_proto;    /* the disconnect that took an up link down: its 802.11 reason or status code */
+  uint16_t last_proto;     /* the latest disconnect's (rejoin attempts, our own commands) */
+  uint8_t  cause_reason;   /* the firmware's reason for it: 1 no network, 2 link lost (beacons), 3 our command, 4 the
+                              AP dropped us, 5 auth failed, 6 assoc failed, 7 no resources, 8 CSERV, 9 bad profile */
+  uint8_t  last_reason;    /* the latest disconnect's */
+  uint8_t  join_timeouts;  /* association attempts with no connect event in time (saturates) */
+  uint8_t  key_timeouts;   /* 4-way handshakes that didn't finish in time (saturates) */
+  uint8_t  need_ptk;       /* AP EAPOL we couldn't answer with the launcher's keys (a group rekey), so we left
+                              to rejoin (saturates) */
+  uint8_t  reserved[3];
+} dss_link_status_t;       /* 80 */
 
 /* DSS_T_CODE: 48 bytes of the game's IRQ dispatcher code, sent once a game
  * (the dispatcher and OS_IrqHandler_ThreadSwitch), so an unrecognised one

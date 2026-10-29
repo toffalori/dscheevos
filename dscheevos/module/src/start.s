@@ -972,19 +972,17 @@ line_vcount:
 2:	subs	r1, r1, #1
 	bne	2b
 	ldr	r1, [r12, #0x214]
+	tst	r1, #1                      @ the VBlank flag up (with or without its IE bit): the band is drawn
+	bne	3f
 	ldr	r0, [r12, #0x210]
 	and	r1, r1, r0
-	tst	r1, #1                      @ the VBlank due: the band is drawn
-	bne	3f
 	tst	r1, #0x10000                @ IPC sync due: nds-bootstrap's menu or reset must not wait
 	bne	4f
 	ldrh	r1, [r12, #6]               @ VCOUNT
-	cmp	r1, #192
-	bhs	5f                          @ past the band without the VBlank IRQ (never expected)
 	ldr	r0, [r3, #L_FIRST]
 	sub	r0, r0, #2
 	cmp	r1, r0
-	blo	5f                          @ before the band: a frame went by (never expected)
+	blo	5f                          @ before the band: the VBlank flag never came (never expected)
 	subs	r2, r2, #1
 	bne	1b
 5:	ldr	r1, [r3, #C_HOLDOUT]        @ the bound or an odd line: back to the game, the band up,

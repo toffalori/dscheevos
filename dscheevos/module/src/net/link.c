@@ -53,6 +53,10 @@ static struct netif g_netif;
 static net_config_t g_config;
 static int g_connected = 1;      /* the launcher left us associated */
 static uint32_t g_rx_frames, g_tx_frames, g_tx_drops;
+/* why the association went, and how rejoining fares (link_diag) */
+static uint32_t g_disc_events, g_connect_events;
+static uint16_t g_cause_proto, g_last_proto;
+static uint8_t  g_cause_reason, g_last_reason, g_join_timeouts, g_key_timeouts, g_need_ptk;
 
 /* association: the launcher's to start with, ours after a rejoin */
 enum { J_UP, J_LEAVING, J_WAITING, J_JOINING, J_KEYING, J_GIVEN_UP };
@@ -389,6 +393,8 @@ static void handle_eapol(const uint8_t* src, const uint8_t* eapol, uint32_t len)
     if (o.install_ptk && g_join == J_KEYING)
       set_up(1);
   } else if (r == WPA_NEED_PTK && g_join == J_UP) {
+    if (g_need_ptk < 0xFF)
+      g_need_ptk++;
     leave_then_join();            /* the launcher's keys: only a new association gets us ours */
   } else if (r == WPA_UNSUPPORTED && g_join == J_KEYING) {
     g_join = J_GIVEN_UP;          /* a handshake we can't finish */
@@ -402,6 +408,16 @@ static void handle_eapol(const uint8_t* src, const uint8_t* eapol, uint32_t len)
 static void handle_wmi(uint16_t id, const uint8_t* p, uint32_t len)
 {
   if (id == WMI_DISCONNECT_EVENT) {
+    /* protocol reason/status (2), BSSID (6), the firmware's reason (1) */
+    g_disc_events++;
+    if (len >= 9) {
+      g_last_proto = (uint16_t)(p[0] | (p[1] << 8));
+      g_last_reason = p[8];
+      if (g_join == J_UP && g_connected) {
+        g_cause_proto = g_last_proto;   /* this one took the link down */
+        g_cause_reason = g_last_reason;
+      }
+    }
     if (g_join == J_LEAVING)
       join();
     else if (g_join != J_GIVEN_UP && g_join != J_WAITING)
@@ -410,6 +426,7 @@ static void handle_wmi(uint16_t id, const uint8_t* p, uint32_t len)
       set_up(0);
   } else if (id == WMI_CONNECT_EVENT) {
     const uint8_t* bssid = len >= 8 ? p + 2 : g_config.ap_bssid;
+    g_connect_events++;
     if (g_config.ap_security == DSCM_AP_WPA2) {
       if (!g_config.pmk_valid) {
         g_join = J_GIVEN_UP;
@@ -539,10 +556,17 @@ void link_service(uint32_t now_ms)
   pump_rx();
   ctrl_flush();
   if ((int32_t)(g_now - g_deadline) >= 0) {
-    if (g_join == J_WAITING || g_join == J_LEAVING)
+    if (g_join == J_WAITING || g_join == J_LEAVING) {
       join();
-    else if (g_join == J_JOINING || g_join == J_KEYING)
+    } else if (g_join == J_JOINING || g_join == J_KEYING) {
+      if (g_join == J_JOINING) {
+        if (g_join_timeouts < 0xFF)
+          g_join_timeouts++;
+      } else if (g_key_timeouts < 0xFF) {
+        g_key_timeouts++;
+      }
       abandon_attempt();
+    }
   }
   sys_check_timeouts();
 }
@@ -582,6 +606,16 @@ void link_diag(dss_link_status_t* out)
   out->rx_queued = (uint8_t)(g_ring.rx_head - g_ring.rx_tail);
   out->shim_flags = (uint8_t)((g_ring.attached ? 1 : 0) | (g_ring.dead ? 2 : 0) | (g_ring.run ? 4 : 0));
   out->join = (uint8_t)g_join;
+  out->disc_events = g_disc_events;
+  out->connect_events = g_connect_events;
+  out->cause_proto = g_cause_proto;
+  out->last_proto = g_last_proto;
+  out->cause_reason = g_cause_reason;
+  out->last_reason = g_last_reason;
+  out->join_timeouts = g_join_timeouts;
+  out->key_timeouts = g_key_timeouts;
+  out->need_ptk = g_need_ptk;
+  memset(out->reserved, 0, sizeof(out->reserved));
 }
 
 void link_stats(uint32_t* rx, uint32_t* tx, uint32_t* drops)
