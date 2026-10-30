@@ -846,10 +846,16 @@ line_vcount:
 	mov	r0, #1
 	ldr	r1, [r12, #0x210]           @ IE
 	ldrh	r2, [r12, #4]               @ DISPSTAT
-	tst	r1, #1                      @ no VBlank IRQ: nothing would put mode 1 back
+	tst	r1, #1                      @ no VBlank IRQ (HeartGold, for stretches while it loads a
+	tstne	r2, #8                      @ house or a town): nothing of the game's would put mode 1
+	bne	1f                          @ back, so only a held band, which the hold ends at line 192
+	ldr	r1, [r3, #L_STAGE]
+	cmp	r1, #2
+	bne	line_skip
+	ldr	r1, [r3, #L_HOLD]
+	cmp	r1, #0
 	beq	line_skip
-	tst	r2, #8
-	beq	line_skip
+1:
 	@ (a game's H-Blank IRQ is no guard: the spin and the hold keep it off
 	@ through the band's lines, and its handler runs once at the VBlank)
 	mov	r0, #4
@@ -1001,13 +1007,16 @@ line_vcount:
 2:	subs	r1, r1, #1
 	bne	2b
 	ldr	r1, [r12, #0x214]
-	tst	r1, #1                      @ the VBlank flag up (with or without its IE bit): the band is drawn
-	bne	3f
 	ldr	r0, [r12, #0x210]
-	and	r1, r1, r0
+	and	r1, r1, r0                  @ IE & IF: a VBlank flag without its IE bit is stale (the game's
+	tst	r1, #1                      @ VBlank IRQ off) and says nothing about this frame
+	bne	3f                          @ the VBlank IRQ due: the band is drawn
 	tst	r1, #0x10000                @ IPC sync due: nds-bootstrap's menu or reset must not wait
 	bne	4f
 	ldrh	r1, [r12, #6]               @ VCOUNT
+	cmp	r1, #192                    @ the VBlank lines and no VBlank IRQ due: the band is drawn and
+	bhs	3f                          @ ends here (3f reads IE & IF again: a VBlank flag set at line
+	                                    @ 192 after the read above is seen there)
 	ldr	r0, [r3, #L_FIRST]
 	sub	r0, r0, #2
 	cmp	r1, r0
@@ -1022,6 +1031,11 @@ line_vcount:
 	and	r2, r2, r1
 	tst	r2, #1
 	bne	line_vblank
+	ldr	r1, [r12, #0x210]           @ the game's VBlank IRQ off: nothing else would put mode 1
+	ldrh	r2, [r12, #4]               @ back, so the band down now
+	tst	r1, #1
+	tstne	r2, #8
+	bleq	band_down
 	b	line_chain
 3:	ldr	r1, [r3, #C_HELD]           @ the VBlank's own path next: the band down, then the
 	add	r1, r1, #1                  @ game's handler for it
