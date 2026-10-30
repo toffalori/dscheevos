@@ -85,36 +85,23 @@ int net_current_ap(net_ap_t* out)
  * WFC_CONNECT also waits for the connection and fails when no saved access
  * point answers; calling it again then waits for ever for an ARM7 that is
  * already running.) */
-static int g_wifi_state;   /* 0 not started, 1 started, -1 failed to start */
-static int g_searching;    /* net_start's search, not yet waited for by net_connect */
-
-int net_start(void)
+int net_connect(int timeout_frames, void (*each_frame)(void))
 {
-  if (g_wifi_state < 0) {
+  static int state;   /* 0 not started, 1 started, -1 failed to start */
+  int i;
+  if (state < 0) {
     g_error = "Wi-Fi didn't start: turn the console off and on";
     return -1;
   }
-  if (g_wifi_state == 0) {
+  if (state == 0) {
     if (!Wifi_InitDefault(WIFI_ATTEMPT_DSI_MODE)) {
-      g_wifi_state = -1;
+      state = -1;
       g_error = "Wi-Fi didn't start: turn the console off and on";
       return -1;
     }
-    g_wifi_state = 1;
+    state = 1;
   }
-  if (!g_searching) {
-    Wifi_AutoConnect();   /* also restarts the search after "cannot connect" */
-    g_searching = 1;
-  }
-  return 0;
-}
-
-int net_connect(int timeout_frames, void (*each_frame)(void))
-{
-  int i;
-  if (net_start() != 0)
-    return -1;
-  g_searching = 0;   /* waited for now: a later call searches again */
+  Wifi_AutoConnect();   /* also restarts the search after "cannot connect" */
   for (i = 0; i < timeout_frames; i++) {
     int status = Wifi_AssocStatus();
     if (status == ASSOCSTATUS_ASSOCIATED) {
