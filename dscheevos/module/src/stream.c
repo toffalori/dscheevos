@@ -88,6 +88,7 @@ static int       g_ever_paired;        /* a phone paired since the game started 
 #define FIRST_PAIR_WAIT_MS 20000u      /* no phone this long after the start: the lost notice (a fast start
                                           looks for the phone only here) */
 #define RECONNECT_WAIT_MS 60000u       /* no phone this long after it: the link-lost notice again */
+#define SERVICE_GAP_MS 1000u           /* no idle pass this long: the game kept the module from running */
 
 /* the recording: this run's id (HELLO), and a replay the phone is reading */
 static uint16_t  g_run;
@@ -472,16 +473,24 @@ static void on_replay_req(const uint8_t* body, uint16_t len, uint32_t now_ms)
 
 static void on_replay_done(const uint8_t* body, uint16_t len, uint32_t now_ms)
 {
-  uint32_t stream, offset;
+  uint32_t stream, offset, written;
   const uint8_t* vals;
-  if (len < sizeof(dss_replay_done_t) || !g_recording || get16(body + 0) != g_run)
+  /* (a late DONE after the replay ended would reset the live stream's base) */
+  if (len < sizeof(dss_replay_done_t) || !g_recording || !g_replaying || get16(body + 0) != g_run)
     return;
   stream = get32(body + 4);
   offset = get32(body + 8);
   g_replay_ms = now_ms;
-  if (stream + offset < dscm_rec_written()) {
+  written = dscm_rec_written();
+  if (stream + offset < written) {
     send_replay(0, stream, offset, DSS_REPLAY_CHUNK);   /* more came meanwhile */
-    return;
+    /* The game records a frame every VBlank or two, so a phone a round trip
+     * behind never finds the end empty (HeartGold stayed in a replay for 38 s,
+     * the phone sending a DONE a frame). Once the rest fits this one piece,
+     * it ends the replay: live FRAMEs go on after it (its seq tells the phone
+     * which comes next; if the piece is lost, the next FRAME shows the gap). */
+    if (written - (stream + offset) > DSS_REPLAY_CHUNK)
+      return;
   }
   /* caught up: live again, as DELTAs from the values the phone now has */
   vals = dscm_rec_values(g_watch, g_watch_count, g_generation);
@@ -724,10 +733,22 @@ static void reconnect_check(uint32_t now_ms, int link_is_up)
 void dscm_stream_service(uint32_t now_ms)
 {
   static int link_was_up = 1;
+  static uint32_t last_pass_ms;
   const int link_is_up = link_up();
   g_now_ms = now_ms;
   if (!g_start_ms)
     g_start_ms = now_ms ? now_ms : 1;
+  /* The game gave the module no idle time for a while (HeartGold while it
+   * saves: about 7 s): nothing was heard or sent meanwhile (the chip's RX
+   * filled up), so that time doesn't count towards losing the phone, nor
+   * towards giving a replay up; no "Phone not reachable" for it. */
+  if (last_pass_ms && now_ms - last_pass_ms > SERVICE_GAP_MS) {
+    if (g_paired)
+      g_last_phone_ms = now_ms ? now_ms : 1;
+    if (g_replaying)
+      g_replay_ms = now_ms;
+  }
+  last_pass_ms = now_ms ? now_ms : 1;
   if (link_is_up != link_was_up) {
     link_was_up = link_is_up;
     link_note(0, now_ms);
