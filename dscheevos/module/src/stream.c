@@ -107,6 +107,7 @@ static int       g_boot_log_done;
 static dss_hello_t g_hello;
 static uint32_t    g_frame_sent;       /* last frame number streamed */
 static uint32_t    g_frames_sent_total, g_frames_stale_total, g_peeks_answered;
+static uint8_t     g_capture_seq;      /* frames captured (recorded, sent, or both): FRAME's seq */
 
 /* LED cues: the phone tells us what it unlocked; the ARM7 card engine reads
  * these counters (header notify_count/cues) and blinks the DSi's LED. */
@@ -274,8 +275,8 @@ static void send_frame(uint32_t frame, const uint8_t* cur)
     uint8_t* body = header(buf, DSS_T_FRAME, g_session, (uint16_t)(10 + n * 4));
     put32(body + 0, frame);
     put16(body + 4, g_generation);
-    body[6] = DSS_FRAME_FULL;
-    body[7] = 0;
+    body[6] = DSS_FRAME_FULL | DSS_FRAME_SEQ;
+    body[7] = g_capture_seq;
     put16(body + 8, n);
     if (n)
       memcpy(body + 10, cur, n * 4);
@@ -299,8 +300,8 @@ static void send_frame(uint32_t frame, const uint8_t* cur)
     }
     put32(body + 0, frame);
     put16(body + 4, g_generation);
-    body[6] = 0;                     /* DELTA */
-    body[7] = 0;
+    body[6] = DSS_FRAME_SEQ;         /* DELTA */
+    body[7] = g_capture_seq;
     put16(body + 8, changed);
     len = (uint16_t)(10 + changed * 6);
     put16(buf + 6, len);
@@ -426,8 +427,8 @@ static void send_replay(uint8_t flags, uint32_t stream, uint32_t offset, uint16_
   }
   body = header(buf, DSS_T_REPLAY_DATA, g_session, (uint16_t)(sizeof(dss_replay_data_t) + len));
   put16(body + 0, g_run);
-  body[2] = flags;
-  body[3] = 0;
+  body[2] = flags | DSS_REPLAY_SEQ;
+  body[3] = g_capture_seq;         /* the last record's: the next live FRAME's seq is one more */
   put32(body + 4, stream);
   put32(body + 8, offset);
   put32(body + 12, written - stream);
@@ -789,6 +790,7 @@ void dscm_stream_frame(uint32_t frame)
   g_hello.vblank = frame;
   if (!g_paired && !record)
     return;
+  g_capture_seq++;                  /* a FRAME the phone never gets shows there as a step of two or more */
   read_words(cur, g_watch_count);
   /* recorded first, always: the phone may not hear the frame sent next */
   if (record)

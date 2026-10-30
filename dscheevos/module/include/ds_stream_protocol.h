@@ -67,6 +67,7 @@
 #define DSS_FRAME_FULL      0x01
 #define DSS_FRAME_STALE     0x02
 #define DSS_FRAME_PAUSED    0x04
+#define DSS_FRAME_SEQ       0x08         /* dss_frame_t.seq is set: the phone sees a lost FRAME and replays it */
 
 #define DSS_CTRL_FULL       1
 #define DSS_CTRL_DELTA      2
@@ -155,11 +156,13 @@ typedef struct __attribute__((packed)) {
 #define DSS_REPLAY_GAP   0x01  /* recorded frames before the first segment sent were overwritten: some are lost */
 #define DSS_REPLAY_NONE  0x02  /* no recording (or not this run): nothing to replay */
 #define DSS_REPLAY_END   0x04  /* this piece reaches the end of what is recorded so far */
+#define DSS_REPLAY_SEQ   0x08  /* dss_replay_data_t.seq is set */
 
 typedef struct __attribute__((packed)) {
   uint16_t run;
   uint8_t  flags;          /* DSS_REPLAY_* */
-  uint8_t  reserved;
+  uint8_t  seq;            /* DSS_REPLAY_SEQ: dss_frame_t.seq of the last captured frame (the next live FRAME's
+                              is one more) */
   uint32_t stream;         /* the stream offset of the replay's first segment */
   uint32_t offset;         /* this piece's bytes start here (from `stream`) */
   uint32_t avail;          /* bytes recorded from `stream` to now */
@@ -191,7 +194,8 @@ typedef struct __attribute__((packed)) {
   uint32_t vblank;
   uint16_t generation;
   uint8_t  flags;
-  uint8_t  reserved;
+  uint8_t  seq;            /* DSS_FRAME_SEQ: the frame's number among the captured ones (recorded, sent, or
+                              both), low 8 bits: one more than the last FRAME's unless FRAMEs were lost */
   uint16_t count;
   /* FULL: uint8_t word[count][4] in table order
    * DELTA: struct { uint16_t index; uint8_t word[4]; } change[count] */
