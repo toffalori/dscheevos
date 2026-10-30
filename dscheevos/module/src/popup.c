@@ -1581,6 +1581,14 @@ static void tick(uint32_t frame)
     } else {
       line_publish(g_cur.phase >= P_IN && g_rendered && g_screen_frames >= SCREEN_STABLE ? visible_rows() : 0);
     }
+  } else if (g_cur.phase >= P_IN && line_wanted() && !g_armed && !(frame & 7)) {
+    /* The line path was refused when this pop-up began (HeartGold right
+     * after its start: the display not yet in mode 1, line_refused 0x80), so
+     * it runs on the idle-armed path, which blinks in busy frames: try again
+     * a few times a second while it is up, never with an idle-armed band
+     * armed. As at a pop-up's start, the band is published from the next
+     * tick on. */
+    line_install();
   }
 }
 
