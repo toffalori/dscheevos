@@ -1406,6 +1406,14 @@ static void line_publish(int rows)
   dscm_irq_restore(cpsr);
 }
 
+/* The band owns the VCOUNT IRQ now (the line path on the vector, not stood
+ * down for the game): stream.c's copy of the watched words lets that IRQ
+ * through, as its handler changes no game memory and wakes no game thread. */
+int dscm_popup_owns_vcount(void)
+{
+  return g_line && LW(LW_STATE) && LW(LW_OWN);
+}
+
 /* No band of ours latched or up: the band's pixels may be redrawn. */
 static int line_down(void)
 {

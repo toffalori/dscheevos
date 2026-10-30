@@ -210,11 +210,36 @@ static void send_boot_log(uint32_t now_ms)
 /* Read the watched words into out (table order); IRQs masked so no VBlank
  * splits the copy. Returns 0 if every word read, else the first bad index + 1
  * (an unreadable word reads as zero and the frame is still sent). */
+/* While the copy below runs, only the pop-up band's VCOUNT IRQ may come in:
+ * every 32 words, if it is pending, IE holds that one alone and the CPU takes
+ * it. Its handler switches the display and nothing else (no game memory, no
+ * game thread), so the copy stays one frame's; every other IRQ (the VBlank
+ * first) still waits for its end. Before, the whole copy kept IRQs masked
+ * (HeartGold's 1024 words: the band's IRQ up to 27 lines late, the band
+ * missing in frames while walking). */
+#define STREAM_REG_IE (*(volatile uint32_t*)0x04000210)
+#define STREAM_REG_IF (*(volatile uint32_t*)0x04000214)
+#define STREAM_IRQ_VCOUNT (1u << 2)
+int dscm_popup_owns_vcount(void);   /* popup.c */
+
+static void let_band_irq_in(uint32_t* cpsr)
+{
+  const uint32_t ie = STREAM_REG_IE;
+  if (!(ie & STREAM_REG_IF & STREAM_IRQ_VCOUNT) || !dscm_popup_owns_vcount())
+    return;
+  STREAM_REG_IE = STREAM_IRQ_VCOUNT;
+  dscm_irq_restore(*cpsr);
+  *cpsr = dscm_irq_off();
+  STREAM_REG_IE = ie;
+}
+
 static void read_words(uint8_t* out, uint16_t count)
 {
   uint32_t cpsr = dscm_irq_off();
   uint16_t i;
   for (i = 0; i < count; i++) {
+    if ((i & 31) == 31)
+      let_band_irq_in(&cpsr);
     /* a word in main RAM read straight: through the call, HeartGold's 1024
      * words kept IRQs masked about 2.5 ms, past the pop-up band's VCOUNT IRQ */
     const uint32_t a = g_watch[i];
