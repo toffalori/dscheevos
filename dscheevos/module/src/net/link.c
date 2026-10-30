@@ -667,8 +667,9 @@ void* link_init(const net_config_t* config)
 }
 
 /* VBlanks the card engine left the chip alone for the game's own (DS-mode)
- * wireless, since the start. */
-uint32_t link_paused_count(void)
+ * wireless, since the start (the stream's pairing). Cold, apart from
+ * link_paused: that one is hot code (hot.ld, hot-layout.ref). */
+DSCM_COLD uint32_t link_paused_count(void)
 {
   dscm_dc_invalidate((const void*)&g_ring.attached, offsetof(shim_shared_t, tx) - offsetof(shim_shared_t, attached));
   return g_ring.stats.paused_ntr_wifi;
@@ -679,7 +680,9 @@ uint32_t link_paused_count(void)
 int link_paused(uint32_t* paused_count)
 {
   static uint32_t last;
-  const uint32_t now = link_paused_count();
+  uint32_t now;
+  dscm_dc_invalidate((const void*)&g_ring.attached, offsetof(shim_shared_t, tx) - offsetof(shim_shared_t, attached));
+  now = g_ring.stats.paused_ntr_wifi;
   *paused_count = now;
   if (now != last) {
     last = now;
