@@ -710,6 +710,20 @@ void dscm_stream_service(uint32_t now_ms)
   }
   if (g_last_phone_ms == 1)         /* the callback heard from the phone this pass */
     g_last_phone_ms = now_ms ? now_ms : 1;
+  {
+    /* While the game's own DS wireless has the radio (the card engine leaves the chip
+     * alone: HeartGold switched it on for 4 s in play), nothing can be heard: that time
+     * doesn't count towards losing the phone, and no "Phone not reachable" for it. */
+    static uint32_t paused_seen;
+    const uint32_t paused = link_paused_count();
+    if (paused != paused_seen) {
+      paused_seen = paused;
+      if (g_paired)
+        g_last_phone_ms = now_ms ? now_ms : 1;
+      if (!g_ever_paired)
+        g_start_ms = now_ms ? now_ms : 1;
+    }
+  }
   reconnect_check(now_ms, link_is_up);
   dscm_g_status.net_detail = g_paired ? g_session : 0;   /* nonzero in the menu = paired */
   if (g_replaying && now_ms - g_replay_ms > DSS_REPLAY_TIMEOUT_MS) {

@@ -43,6 +43,7 @@ int link_up(void);
 int link_rejoining(void);
 int link_busy(void);        /* frames or control messages waiting, or joining */   /* down, but working on getting back */
 uint32_t link_rejoins(void);  /* associations we started ourselves */
+uint32_t link_paused_count(void);  /* VBlanks the chip was left to the game's own DS wireless */
 void link_reconnect(void);    /* the player asked: a fresh association now (stream build, in-game menu) */
 void link_diag(dss_link_status_t* out);   /* the ring's and the ARM7 shim's counters (stream STATUS) */
 void link_stir(void);       /* mix event timing into the TLS entropy pool */

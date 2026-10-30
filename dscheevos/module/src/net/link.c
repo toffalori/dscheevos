@@ -666,14 +666,20 @@ void* link_init(const net_config_t* config)
   return &g_ring;
 }
 
+/* VBlanks the card engine left the chip alone for the game's own (DS-mode)
+ * wireless, since the start. */
+uint32_t link_paused_count(void)
+{
+  dscm_dc_invalidate((const void*)&g_ring.attached, offsetof(shim_shared_t, tx) - offsetof(shim_shared_t, attached));
+  return g_ring.stats.paused_ntr_wifi;
+}
+
 /* Paused: the game is using its own (DS-mode) wireless, so the card engine
  * left the chip alone this VBlank. */
 int link_paused(uint32_t* paused_count)
 {
   static uint32_t last;
-  uint32_t now;
-  dscm_dc_invalidate((const void*)&g_ring.attached, offsetof(shim_shared_t, tx) - offsetof(shim_shared_t, attached));
-  now = g_ring.stats.paused_ntr_wifi;
+  const uint32_t now = link_paused_count();
   *paused_count = now;
   if (now != last) {
     last = now;
