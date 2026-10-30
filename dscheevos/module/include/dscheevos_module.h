@@ -58,6 +58,13 @@
 #define DSCM_IRQ_STACK_SIZE 0x00001000u
 #define DSCM_IRQ_STACK_TOP  (DSCM_STACK_TOP - DSCM_STACK_SIZE)
 #define DSCM_HEAP_END    (DSCM_IRQ_STACK_TOP - DSCM_IRQ_STACK_SIZE)
+/* The spare 4 KB above the heap holds the boot's timeline: nds-bootstrap's
+ * stage 1 and bootloader write it (u32 magic, u32 length, then the text),
+ * the stream sends it to the phone. nds-bootstrap's DSCHEEVOS_BOOTLOG must
+ * match. */
+#define DSCM_BOOT_LOG       DSCM_HEAP_END
+#define DSCM_BOOT_LOG_SIZE  DSCM_IRQ_STACK_SIZE
+#define DSCM_BOOT_LOG_MAGIC 0x4C425344u  /* "DSBL" */
 
 /* Where the module's code sees its own data, heap, arena and session:
  * the cached view (DSCM_BASE, 0x02xxxxxx) or, with DSCM_DATA_MIRROR, the

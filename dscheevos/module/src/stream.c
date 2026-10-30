@@ -92,6 +92,12 @@ static uint32_t  g_replay_stream;      /* the replay's first segment (stream off
 static uint32_t  g_replay_ms;          /* the phone's last REPLAY_REQ/DONE */
 static uint32_t  g_now_ms;             /* dscm_stream_service's clock, for the receive callback */
 
+/* the boot's timeline (DSCM_BOOT_LOG), sent once after the first pairing */
+static uint32_t  g_boot_log_sent;      /* bytes sent so far */
+static uint32_t  g_boot_log_ms;        /* when the last piece went */
+static int       g_boot_log_done;
+#define BOOT_LOG_GAP_MS 50u            /* between pieces: the ARM7 shim's TX ring has 4 slots */
+
 /* HELLO payload, filled at start */
 static dss_hello_t g_hello;
 static uint32_t    g_frame_sent;       /* last frame number streamed */
@@ -156,6 +162,44 @@ static void send_hello(void)
   send_to(&bcast, DSS_PORT, buf, (uint16_t)sizeof(buf));
   if (g_phone_known)
     send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)sizeof(buf));
+}
+
+/* One piece of the boot's timeline a call, whole lines, until all of it went:
+ * stage 1's log and the bootloader's stamps, which nds-bootstrap left in the
+ * module region's spare 4 KB (nothing of ours touches it, so the cache holds
+ * none of it). Once a game start; a lost piece stays lost (log only). */
+static void send_boot_log(uint32_t now_ms)
+{
+  static uint8_t buf[DSS_HEADER_SIZE + sizeof(dss_boot_log_t) + DSS_BOOT_LOG_PIECE];
+  const volatile uint32_t* head = (const volatile uint32_t*)DSCM_DATA_ADDR(DSCM_BOOT_LOG);
+  const char* text = (const char*)DSCM_DATA_ADDR(DSCM_BOOT_LOG + 8);
+  dss_boot_log_t h;
+  uint32_t total, n;
+  uint8_t* body;
+  if (g_boot_log_done || now_ms - g_boot_log_ms < BOOT_LOG_GAP_MS)
+    return;
+  total = head[1];
+  if (head[0] != DSCM_BOOT_LOG_MAGIC || total > DSCM_BOOT_LOG_SIZE - 8 || g_boot_log_sent >= total) {
+    g_boot_log_done = 1;
+    return;
+  }
+  n = total - g_boot_log_sent;
+  if (n > DSS_BOOT_LOG_PIECE) {
+    n = DSS_BOOT_LOG_PIECE;
+    while (n > 1 && text[g_boot_log_sent + n - 1] != '\n')
+      n--;
+    if (n <= 1)
+      n = DSS_BOOT_LOG_PIECE;   /* no line end in a whole piece: cut it */
+  }
+  h.offset = (uint16_t)g_boot_log_sent;
+  h.total = (uint16_t)total;
+  h.vblank = g_hello.vblank;
+  body = header(buf, DSS_T_BOOT_LOG, g_session, (uint16_t)(sizeof(h) + n));
+  memcpy(body, &h, sizeof(h));
+  memcpy(body + sizeof(h), text + g_boot_log_sent, n);
+  send_to(&g_phone_ip, g_phone_port, buf, (uint16_t)(DSS_HEADER_SIZE + sizeof(h) + n));
+  g_boot_log_sent += n;
+  g_boot_log_ms = now_ms;
 }
 
 /* Read the watched words into out (table order); IRQs masked so no VBlank
@@ -668,6 +712,8 @@ void dscm_stream_service(uint32_t now_ms)
       g_lost_ms = now_ms ? now_ms : 1;
       g_lost_shown = 0;
       link_note(1, now_ms);
+    } else {
+      send_boot_log(now_ms);
     }
     return;
   }

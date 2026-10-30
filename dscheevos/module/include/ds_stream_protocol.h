@@ -28,6 +28,7 @@
 #define DSS_T_STATUS        0x04
 #define DSS_T_POPUP_STATE   0x05   /* what became of a POPUP (dss_popup_state_t) */
 #define DSS_T_CODE          0x06   /* a piece of the game's IRQ dispatcher, once a game (dss_code_t) */
+#define DSS_T_BOOT_LOG      0x08   /* lines of the boot's timeline, once a game start (dss_boot_log_t + text) */
 /* phone -> console */
 #define DSS_T_TABLE         0x81
 #define DSS_T_CHAIN         0x82
@@ -442,5 +443,16 @@ typedef struct __attribute__((packed)) {
   uint32_t address;
   uint8_t  bytes[48];
 } dss_code_t;              /* 52 */
+
+/* DSS_T_BOOT_LOG: the boot's timeline (stage 1's log lines, then the
+ * bootloader's stamps), kept in RAM by nds-bootstrap and sent once the
+ * phone first pairs, in pieces of whole lines, so the phone's log times a
+ * boot with LOGGING = 0 too. The text follows the header, not terminated. */
+#define DSS_BOOT_LOG_PIECE  1024
+typedef struct __attribute__((packed)) {
+  uint16_t offset;         /* of this piece in the whole text */
+  uint16_t total;          /* the whole text's length */
+  uint32_t vblank;         /* VBlanks since the game started, when sent */
+} dss_boot_log_t;          /* 8, then up to DSS_BOOT_LOG_PIECE bytes of text */
 
 #endif
