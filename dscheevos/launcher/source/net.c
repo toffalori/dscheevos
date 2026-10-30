@@ -159,12 +159,45 @@ int net_lease_used(void) { return g_lease_used; }
  * WFC_CONNECT also waits for the connection and fails when no saved access
  * point answers; calling it again then waits for ever for an ARM7 that is
  * already running.) */
+static void wait_frames(int n, void (*each_frame)(void))
+{
+  while (n-- > 0) {
+    if (each_frame)
+      each_frame();
+    cothread_yield_irq(IRQ_VBLANK);
+  }
+}
+
+/* After a failed join, DSWiFi's ARM7 stays in its "can't connect" state until
+ * it sees the ARM9 stop asking to connect, and Wifi_AutoConnect asks again at
+ * once (it matches a saved access point from the last scan in the same
+ * frame): every retry then failed within a frame, for ever, until the console
+ * was turned off. So a retry first leaves that state (disconnect, a pause the
+ * ARM7 sees); from the second failure on it restarts the chip as a power-on
+ * would. */
+static int g_failures;
+
+static void reset_after_failure(void (*each_frame)(void))
+{
+  if (g_failures >= 2) {
+    Wifi_DisableWifi();
+    wait_frames(60, each_frame);
+    Wifi_EnableWifi();
+    wait_frames(30, each_frame);
+  } else {
+    Wifi_DisconnectAP();
+    wait_frames(30, each_frame);
+  }
+}
+
 int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok)
 {
   static int state;   /* 0 not started, 1 started, -1 failed to start */
   int i;
   lease_ok = lease_ok && lease_load();
   g_lease_used = 0;
+  if (state == 1 && g_failures)
+    reset_after_failure(each_frame);
   if (state < 0) {
     g_error = "Wi-Fi didn't start: turn the console off and on";
     return -1;
@@ -181,6 +214,7 @@ int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok)
   for (i = 0; i < timeout_frames; i++) {
     int status = Wifi_AssocStatus();
     if (status == ASSOCSTATUS_ASSOCIATED) {
+      g_failures = 0;
       remember_ap();
       lease_save();
       tls_stir();
@@ -191,12 +225,14 @@ int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok)
       remember_ap();
       if (g_ap_valid && g_ap.ssid_len == g_lease.ssid_len && !memcmp(g_ap.ssid, g_lease.ssid, g_ap.ssid_len)) {
         g_lease_used = 1;
+        g_failures = 0;
         return 0;
       }
       lease_ok = 0;   /* another network: wait for its DHCP */
     }
     if (status == ASSOCSTATUS_CANNOTCONNECT) {
       g_error = "Couldn't connect to a saved access point";
+      g_failures++;
       return -1;
     }
     if (each_frame)
@@ -206,6 +242,7 @@ int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok)
     cothread_yield_irq(IRQ_VBLANK);
   }
   g_error = "No saved access point answered";
+  g_failures++;
   return -1;
 }
 

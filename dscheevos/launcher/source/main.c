@@ -492,12 +492,16 @@ int main(int argc, char** argv)
     scanKeys();
     const int fast = !offer && recording_last_paired() && !(keysHeld() & KEY_Y);
     log_line("start: %s", fast ? "fast" : offer ? "full (a recording to offer)" : "full");
+    int wifi_failures = 0;   /* in a row: the first two are tried again without asking */
     for (;;) {
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
       log_line("wifi: connecting");
       if (net_connect(60 * 20, ui_tick, fast) != 0) {
         log_line("stream wifi: %s", net_error());
+        if (++wifi_failures <= 2) {
+          continue;
+        }
         ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
         if (ui_choose("Cheevotron needs Wi-Fi to reach\n the phone.", "Try again", "Play without achievements") == 'B')
           boot_game(0);
