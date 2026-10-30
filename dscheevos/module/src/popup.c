@@ -1158,14 +1158,6 @@ static uint8_t  g_line_used;                   /* a line path went up in this ga
 static uint32_t g_line_seen[LC_COUNT];         /* the counters at the last tick */
 static const uint16_t k_feed_off[7] = { LC_BUSYS, LC_BUSYE, LC_GXS, LC_GXE, LC_HELD, LC_HOLDIPC, LC_HOLDOUT };
 static uint32_t g_feed_seen[7];                /* those counters at the last tick */
-/* After a guard held a band back, the next comes only after LINE_CALM frames
- * without one: HeartGold turns its VBlank IRQ off in many short stretches
- * while it loads a house or a town, and a band in every frame between them
- * blinked. Now the pop-up pauses once and goes on half a second after the
- * load (its time counts only frames it was up). */
-#define LINE_CALM 30
-static uint32_t g_line_skip_seen;               /* g_stats.line_skip at the last tick */
-static uint16_t g_line_calm = LINE_CALM;        /* frames since a band was last held back */
 
 /* GX_DispOff, word for word in NitroSDK 2.0 (Super Mario 64 DS) and 4.x
  * (Pokemon HG, Platinum): DISPCNT's mode bits saved in sDispMode (ldr r0,=),
@@ -1553,12 +1545,6 @@ static void tick(uint32_t frame)
     shown = line_collect(&cut);
     if (cut)
       g_cur.st.frames_cut = (uint16_t)(g_cur.st.frames_cut + cut);
-    if (g_stats.line_skip != g_line_skip_seen) {   /* a guard held a band back since the last tick */
-      g_line_skip_seen = g_stats.line_skip;
-      g_line_calm = 0;
-    } else if (g_line_calm < LINE_CALM) {
-      g_line_calm = (uint16_t)(g_line_calm + passed < LINE_CALM ? g_line_calm + passed : LINE_CALM);
-    }
   } else {
     shown = g_stats.frames_shown != g_shown_seen || g_stats.frames_cut != g_cut_seen;
     if (g_stats.frames_cut != g_cut_seen)
@@ -1593,8 +1579,7 @@ static void tick(uint32_t frame)
       if (line_down())
         line_uninstall(LW(LW_OWN) != 0);
     } else {
-      line_publish(g_cur.phase >= P_IN && g_rendered && g_screen_frames >= SCREEN_STABLE && g_line_calm >= LINE_CALM
-                   ? visible_rows() : 0);
+      line_publish(g_cur.phase >= P_IN && g_rendered && g_screen_frames >= SCREEN_STABLE ? visible_rows() : 0);
     }
   }
 }
