@@ -282,6 +282,21 @@ static int test_slots(void)
   a.replayed = 1; b.seq = 0;
   if (dscm_rec_pick_slot(&a, &b) != 1 || dscm_rec_offer_slot(&a, &b) != -1 || dscm_rec_next_seq(&a, &b) != 2)
     return fail("all replayed");
+  /* the phone's last live frame against the last record's (fast start) */
+  memset(&b, 0, sizeof(b));
+  a.replayed = 0; a.end_frame = 1000;
+  a.phone_frame = 0;                                   /* never paired: offered */
+  if (dscm_recslot_covered(&a) || dscm_rec_offer_slot(&a, &b) != 0)
+    return fail("never paired");
+  a.phone_frame = 1000 - DSCM_REC_COVER_FRAMES - 1;    /* lost the link a little over a second before the end */
+  if (dscm_recslot_covered(&a) || dscm_rec_offer_slot(&a, &b) != 0)
+    return fail("lost before the end");
+  a.phone_frame = 1000 - DSCM_REC_COVER_FRAMES;        /* its report a second behind: seen to the end */
+  if (!dscm_recslot_covered(&a) || dscm_rec_offer_slot(&a, &b) != -1 || dscm_rec_pick_slot(&a, &b) != 1)
+    return fail("covered");
+  a.phone_frame = 1010;                                /* ahead of the last header's record */
+  if (!dscm_recslot_covered(&a) || dscm_rec_offer_slot(&a, &b) != -1)
+    return fail("covered, ahead");
   return 0;
 }
 

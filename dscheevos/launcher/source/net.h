@@ -7,9 +7,17 @@
 
 /* Connects with the access points saved in the console's settings. Uses the
  * DSi's own Wi-Fi (WPA2) when available. Returns 0 when online. Calls
- * each_frame (if any) once per frame while it waits. */
-int net_connect(int timeout_frames, void (*each_frame)(void));
+ * each_frame (if any) once per frame while it waits. With lease_ok, returns
+ * as soon as the link is up on the access point of the remembered DHCP
+ * lease (net.bin), without DHCP: only for handing the link to the game,
+ * the launcher itself has no address then. */
+int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok);
 const char* net_error(void);
+
+/* The IP settings for the game: DHCP's, or the remembered lease when
+ * net_connect skipped DHCP. Network byte order; 0 if there is no address. */
+int net_ip_info(uint32_t* ip, uint32_t* netmask, uint32_t* gateway, uint32_t* dns);
+int net_lease_used(void);
 
 /* The access point we joined, as seen in its beacons (no keys). */
 typedef struct net_ap_t {

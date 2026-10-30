@@ -45,6 +45,7 @@ void dscm_rec_note(uint32_t line, const char* text);
 void dscm_rec_frame(uint32_t frame, const uint32_t* addr, uint16_t count, uint16_t generation, const uint8_t* cur);
 uint32_t dscm_rec_written(void);
 uint32_t dscm_rec_end_frame(void);
+void dscm_rec_phone_frame(uint32_t frame);
 const uint8_t* dscm_rec_values(const uint32_t* addr, uint16_t count, uint16_t generation);
 uint32_t dscm_rec_find(uint32_t from_frame, int* gap);
 uint32_t dscm_rec_read(uint32_t abs_offset, uint8_t* out, uint32_t len);
@@ -82,6 +83,10 @@ static int       g_force_full;
 static uint32_t  g_lost_ms;            /* when a pairing timed out (0: none since the last) */
 static uint8_t   g_lost_shown;         /* "Phone link lost" notices shown since */
 static uint32_t  g_reconnect_ms;        /* the in-game menu's Reconnect: when (0: none waiting) */
+static uint32_t  g_start_ms;           /* the first service pass (0: not yet) */
+static int       g_ever_paired;        /* a phone paired since the game started */
+#define FIRST_PAIR_WAIT_MS 20000u      /* no phone this long after the start: the lost notice (a fast start
+                                          looks for the phone only here) */
 #define RECONNECT_WAIT_MS 60000u       /* no phone this long after it: the link-lost notice again */
 
 /* the recording: this run's id (HELLO), and a replay the phone is reading */
@@ -510,6 +515,7 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
         /* TABLE pairs us and sets the session; everything else must match it */
         if (type == DSS_T_TABLE) {
           g_paired = 1;
+          g_ever_paired = 1;
           g_session = session;
           g_lost_ms = 0;
           ip_addr_copy(g_phone_ip, *addr);
@@ -534,7 +540,12 @@ static void on_udp(void* arg, struct udp_pcb* pcb, struct pbuf* p, const ip_addr
             case DSS_T_BADGE:     dscm_popup_on_badge(body, length); break;
             case DSS_T_REPLAY_REQ:  on_replay_req(body, length, g_now_ms); break;
             case DSS_T_REPLAY_DONE: on_replay_done(body, length, g_now_ms); break;
-            case DSS_T_KEEPALIVE: break;   /* liveness only */
+            case DSS_T_KEEPALIVE:
+              /* the last frame the phone evaluated, into the recording's header (no
+               * frame of ours yet past it: not a stale number from an earlier run) */
+              if (length >= 4 && get32(body) <= g_frame_sent)
+                dscm_rec_phone_frame(get32(body));
+              break;
             default: break;
           }
         }
@@ -689,6 +700,8 @@ void dscm_stream_service(uint32_t now_ms)
   static int link_was_up = 1;
   const int link_is_up = link_up();
   g_now_ms = now_ms;
+  if (!g_start_ms)
+    g_start_ms = now_ms ? now_ms : 1;
   if (link_is_up != link_was_up) {
     link_was_up = link_is_up;
     link_note(0, now_ms);
@@ -716,6 +729,10 @@ void dscm_stream_service(uint32_t now_ms)
       send_boot_log(now_ms);
     }
     return;
+  }
+  if (!g_ever_paired && !g_lost_ms && now_ms - g_start_ms >= FIRST_PAIR_WAIT_MS) {
+    g_lost_ms = now_ms ? now_ms : 1;   /* never found: the same notice, now and 2 minutes on */
+    g_lost_shown = 0;
   }
   lost_notice(now_ms);
   if (now_ms - g_last_hello_ms >= DSS_HELLO_MS) {

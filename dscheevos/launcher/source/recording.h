@@ -31,8 +31,13 @@ typedef struct recording_t {
  * first sector names the game. Returns 0 when it couldn't be written. */
 int recording_prepare(const char* rom_path, const char* hash);
 
-/* A recording the phone hasn't replayed, the newest; 0 if none. */
+/* A recording the phone hasn't replayed, the newest; 0 if none. A run the
+ * phone evaluated live to its end (dscm_recslot_covered) isn't offered. */
 int recording_offer(recording_t* out);
+
+/* The last run (the newest claimed slot) reached the phone: it reported a
+ * frame. 0 when it never paired, or there is no run on file. */
+int recording_last_paired(void);
 
 /* Reads the slot's data and finds its segments; 0 if that fails. Done by
  * recording_reply on the first request. */

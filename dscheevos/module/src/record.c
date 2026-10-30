@@ -179,6 +179,15 @@ void dscm_rec_frame(uint32_t frame, const uint32_t* addr, uint16_t count, uint16
 uint32_t dscm_rec_written(void) { return g_written; }
 uint32_t dscm_rec_end_frame(void) { return g_frame; }
 
+/* The last frame the phone evaluated live (its KEEPALIVE): the ARM7 puts it
+ * into the slot's header with the next publish, and the launcher offers no
+ * recording the phone saw to its end (dscm_recslot_covered). */
+void dscm_rec_phone_frame(uint32_t frame)
+{
+  if (g_size && frame > g_rec.phone_frame)
+    g_rec.phone_frame = frame;
+}
+
 /* The values the last record left, if they are for this table (the live
  * stream's base once a replay has caught up). */
 const uint8_t* dscm_rec_values(const uint32_t* addr, uint16_t count, uint16_t generation)

@@ -119,6 +119,31 @@ int recording_offer(recording_t* out)
   return 1;
 }
 
+int recording_last_paired(void)
+{
+  dscm_recslot_t s[DSCM_REC_SLOTS];
+  const dscm_recslot_t* last = NULL;
+  int i;
+  FILE* f = fopen(DSCM_REC_FILE, "rb");
+  if (!f)
+    return 0;
+  memset(s, 0, sizeof(s));
+  if (!read_slot_header(f, 0, &s[0]) || !read_slot_header(f, 1, &s[1])) {
+    fclose(f);
+    return 0;
+  }
+  fclose(f);
+  for (i = 0; i < (int)DSCM_REC_SLOTS; i++) {
+    if (dscm_recslot_valid(&s[i]) && (!last || s[i].seq > last->seq))
+      last = &s[i];
+  }
+  if (!last)
+    return 0;
+  log_line("recording: last run %u (seq %u): phone at frame %u of %u", (unsigned)last->run, (unsigned)last->seq,
+           (unsigned)last->phone_frame, (unsigned)last->end_frame);
+  return last->phone_frame != 0;
+}
+
 int recording_load(recording_t* r)
 {
   const uint32_t bytes = r->h.data_sectors * SECTOR;

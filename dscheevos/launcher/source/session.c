@@ -386,14 +386,14 @@ int session_write(const dsc_settings_t* settings, const char* rom_path, const ch
   /* The game keeps using this Wi-Fi connection: pass its settings (no keys;
    * the chip keeps those itself). */
   {
-    struct in_addr gateway, netmask, dns1, dns2;
-    struct in_addr ip = Wifi_GetIPInfo(&gateway, &netmask, &dns1, &dns2);
-    if (settings_keep_wifi(settings) && ip.s_addr && Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, boot.mac) >= 0) {
+    uint32_t ip, netmask, gateway, dns;   /* DHCP's, or the remembered lease on a fast start */
+    if (settings_keep_wifi(settings) && net_ip_info(&ip, &netmask, &gateway, &dns)
+        && Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, boot.mac) >= 0) {
       boot.net_valid = 1;
-      boot.ip = ip.s_addr;
-      boot.netmask = netmask.s_addr;
-      boot.gateway = gateway.s_addr;
-      boot.dns = dns1.s_addr;
+      boot.ip = ip;
+      boot.netmask = netmask;
+      boot.gateway = gateway;
+      boot.dns = dns;
     }
   }
   /* so the module can rejoin it; nds-bootstrap adds the PMK in RAM */

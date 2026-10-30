@@ -196,7 +196,7 @@ static int log_in(void)
       continue;
     ui_status("Logging in as %s...", settings.username);
     wifi_started = 1;
-    if (net_connect(60 * 20, ui_tick) != 0) {
+    if (net_connect(60 * 20, ui_tick, 0) != 0) {
       ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
       continue;
     }
@@ -482,22 +482,32 @@ int main(int argc, char** argv)
      * the game hash (no login, no set download, no placard), and boot. The
      * phone runs rcheevos over the streamed RAM. The splash is up already.
      * A recording of the last run the phone missed the end of is offered to
-     * it while it is looked for; the file is made ready for this run's. */
+     * it while it is looked for; the file is made ready for this run's.
+     * Fast start: when there is nothing to offer and the last run reached the
+     * phone, the phone isn't looked for here (the game pairs with it and
+     * says so on its screen), and the link goes over as soon as it is up,
+     * with the remembered DHCP lease. Hold Y for the full start. */
     static recording_t recording;
     recording_t* offer = recording_offer(&recording) ? &recording : NULL;
+    scanKeys();
+    const int fast = !offer && recording_last_paired() && !(keysHeld() & KEY_Y);
+    log_line("start: %s", fast ? "fast" : offer ? "full (a recording to offer)" : "full");
     for (;;) {
       ui_status("Connecting to Wi-Fi...");
       wifi_started = 1;
       log_line("wifi: connecting");
-      if (net_connect(60 * 20, ui_tick) != 0) {
+      if (net_connect(60 * 20, ui_tick, fast) != 0) {
         log_line("stream wifi: %s", net_error());
         ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
         if (ui_choose("Cheevotron needs Wi-Fi to reach\n the phone.", "Try again", "Play without achievements") == 'B')
           boot_game(0);
         continue;
       }
-      log_line("wifi: connected");
-      find_phone(hash, offer);
+      log_line(net_lease_used() ? "wifi: link up, the remembered lease for the game" : "wifi: connected");
+      if (fast)
+        settings.phone_ip = phone_remembered();
+      else
+        find_phone(hash, offer);
       recording_free(&recording);
       if (!recording_prepare(rom_path, hash))
         log_line("recording: couldn't prepare %s: this run won't be kept", DSCM_REC_FILE);
@@ -507,7 +517,7 @@ int main(int argc, char** argv)
           boot_game(0);
         continue;
       }
-      let_phone_ready_show();
+      let_phone_ready_show();   /* nothing to wait for on a fast start */
       boot_game(1);
     }
   }
@@ -522,7 +532,7 @@ int main(int argc, char** argv)
 
     ui_status("Connecting to Wi-Fi...");
     wifi_started = 1;
-    if (net_connect(60 * 20, ui_tick) != 0) {
+    if (net_connect(60 * 20, ui_tick, 0) != 0) {
       log_line("wifi: %s", net_error());
       ui_status("\x1b[31;1m%s\x1b[39;0m", net_error());
       if (ui_choose("Achievements need the Internet\n when the game starts.", "Try again", "Play without achievements") == 'B')

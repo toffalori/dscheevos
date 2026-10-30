@@ -52,7 +52,7 @@ typedef struct dscm_rec_t {
   volatile uint32_t written;          /* stream bytes recorded so far (the ring holds the last ring_size of them) */
   volatile uint32_t segment;          /* stream offset of the latest segment */
   volatile uint32_t end_frame;        /* the frame of the last record */
-  uint32_t reserved2;
+  volatile uint32_t phone_frame;      /* the last frame the phone evaluated live (its KEEPALIVE), 0 none yet */
   /* the ARM7's lines, from offset 64: its progress and costs, for the status */
   volatile uint32_t sd_written;       /* stream bytes on the SD card (whole sectors, each confirmed by the controller) */
   volatile uint32_t sd_valid_from;    /* the file's copy is continuous from this stream offset to sd_written */
@@ -137,7 +137,7 @@ typedef struct dscm_recslot_t {
   uint32_t end_frame;                 /* the frame of the last record the module reported */
   uint32_t skipped;                   /* sectors lost to the ring overtaking the writer */
   uint32_t errors;                    /* SD write errors seen */
-  uint32_t reserved;
+  uint32_t phone_frame;               /* dscm_rec_t.phone_frame when the header was written: 0 the phone never paired */
 } dscm_recslot_t;                     /* 96 bytes */
 
 typedef char dscm_recslot_size_check[sizeof(dscm_recslot_t) == 96 ? 1 : -1];
@@ -147,10 +147,22 @@ static inline int dscm_recslot_valid(const dscm_recslot_t* s)
   return s->magic == DSCM_RECSLOT_MAGIC && s->size == sizeof(*s) && s->data_sectors == DSCM_REC_DATA_SECTORS;
 }
 
-/* A recording the phone hasn't replayed: a run that got as far as a sector. */
+/* The phone evaluated the run live to its recorded end: its last reported
+ * frame is at most DSCM_REC_COVER_FRAMES (1 s) before the frame of the last
+ * record. The report lags the record by up to a KEEPALIVE period (0.4 s) and
+ * a header write; frames after the last header are lost to a power-off
+ * either way. Nothing of such a run is left for the launcher to offer. */
+#define DSCM_REC_COVER_FRAMES 60u
+static inline int dscm_recslot_covered(const dscm_recslot_t* s)
+{
+  return s->phone_frame != 0 && s->phone_frame + DSCM_REC_COVER_FRAMES >= s->end_frame;
+}
+
+/* A recording the phone hasn't replayed: a run that got as far as a sector,
+ * and not evaluated live to its end. */
 static inline int dscm_recslot_holds(const dscm_recslot_t* s)
 {
-  return dscm_recslot_valid(s) && s->run != 0 && s->written != 0 && !s->replayed;
+  return dscm_recslot_valid(s) && s->run != 0 && s->written != 0 && !s->replayed && !dscm_recslot_covered(s);
 }
 
 /* The slot a new run takes: one that holds no recording, else the older. */

@@ -81,14 +81,90 @@ int net_current_ap(net_ap_t* out)
   return 0;
 }
 
+/* The last DHCP lease (sd:/_nds/dscheevos/net.bin), for a fast start: on the
+ * same access point the game takes the address again, and the launcher
+ * hands the link over as soon as it is up (WPA2 keys in) instead of waiting
+ * for DHCP. A wrong guess (the lease went to another device) shows as a run
+ * that never reached the phone, and the next start is a full one. */
+#define LEASE_PATH  "sd:/_nds/dscheevos/net.bin"
+#define LEASE_MAGIC 0x4C4E5344u   /* "DSNL" */
+
+typedef struct net_lease_t {
+  uint32_t magic;
+  char ssid[32];
+  uint8_t ssid_len;
+  uint8_t reserved[3];
+  uint32_t ip, netmask, gateway, dns;   /* network byte order */
+} net_lease_t;
+
+static net_lease_t g_lease;
+static int g_lease_used;   /* the link went over before DHCP: the game takes g_lease */
+
+static int lease_load(void)
+{
+  FILE* f = fopen(LEASE_PATH, "rb");
+  int ok = f && fread(&g_lease, 1, sizeof(g_lease), f) == sizeof(g_lease);
+  if (f)
+    fclose(f);
+  return ok && g_lease.magic == LEASE_MAGIC && g_lease.ssid_len && g_lease.ssid_len <= 32 && g_lease.ip;
+}
+
+/* after DHCP: kept when it changed */
+static void lease_save(void)
+{
+  struct in_addr gateway, netmask, dns1, dns2;
+  struct in_addr ip = Wifi_GetIPInfo(&gateway, &netmask, &dns1, &dns2);
+  net_lease_t l;
+  FILE* f;
+  if (!ip.s_addr || !g_ap_valid)
+    return;
+  memset(&l, 0, sizeof(l));
+  l.magic = LEASE_MAGIC;
+  memcpy(l.ssid, g_ap.ssid, sizeof(l.ssid));
+  l.ssid_len = g_ap.ssid_len;
+  l.ip = ip.s_addr;
+  l.netmask = netmask.s_addr;
+  l.gateway = gateway.s_addr;
+  l.dns = dns1.s_addr;
+  if (lease_load() && !memcmp(&l, &g_lease, sizeof(l)))
+    return;
+  f = fopen(LEASE_PATH, "wb");
+  if (f) {
+    fwrite(&l, 1, sizeof(l), f);
+    fclose(f);
+  }
+}
+
+int net_ip_info(uint32_t* ip, uint32_t* netmask, uint32_t* gateway, uint32_t* dns)
+{
+  if (g_lease_used) {
+    *ip = g_lease.ip;
+    *netmask = g_lease.netmask;
+    *gateway = g_lease.gateway;
+    *dns = g_lease.dns;
+  } else {
+    struct in_addr gw, nm, dns1, dns2;
+    struct in_addr a = Wifi_GetIPInfo(&gw, &nm, &dns1, &dns2);
+    *ip = a.s_addr;
+    *netmask = nm.s_addr;
+    *gateway = gw.s_addr;
+    *dns = dns1.s_addr;
+  }
+  return *ip != 0;
+}
+
+int net_lease_used(void) { return g_lease_used; }
+
 /* DSWiFi starts once; a retry only searches again. (Wifi_InitDefault with
  * WFC_CONNECT also waits for the connection and fails when no saved access
  * point answers; calling it again then waits for ever for an ARM7 that is
  * already running.) */
-int net_connect(int timeout_frames, void (*each_frame)(void))
+int net_connect(int timeout_frames, void (*each_frame)(void), int lease_ok)
 {
   static int state;   /* 0 not started, 1 started, -1 failed to start */
   int i;
+  lease_ok = lease_ok && lease_load();
+  g_lease_used = 0;
   if (state < 0) {
     g_error = "Wi-Fi didn't start: turn the console off and on";
     return -1;
@@ -106,8 +182,18 @@ int net_connect(int timeout_frames, void (*each_frame)(void))
     int status = Wifi_AssocStatus();
     if (status == ASSOCSTATUS_ASSOCIATED) {
       remember_ap();
+      lease_save();
       tls_stir();
       return 0;
+    }
+    /* link up, keys in (DSWiFi asks for DHCP only after the WPA2 handshake) */
+    if (status == ASSOCSTATUS_ACQUIRINGDHCP && lease_ok) {
+      remember_ap();
+      if (g_ap_valid && g_ap.ssid_len == g_lease.ssid_len && !memcmp(g_ap.ssid, g_lease.ssid, g_ap.ssid_len)) {
+        g_lease_used = 1;
+        return 0;
+      }
+      lease_ok = 0;   /* another network: wait for its DHCP */
     }
     if (status == ASSOCSTATUS_CANNOTCONNECT) {
       g_error = "Couldn't connect to a saved access point";
